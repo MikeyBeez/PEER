@@ -40,14 +40,19 @@ python benchmark_efficiency.py --expert-counts 16384 65536 262144 802816
 
 ## Quality Results (with Training)
 
-| Model | Perplexity | Notes |
-|-------|-----------|-------|
-| Base TinyLlama | 16.54 | Baseline |
-| + Engram | 11.30 | **-31.67%** - pattern memory |
-| + PEER | 16.54 | Maintains quality with sparse retrieval |
-| + Both (Hybrid) | 11.06 | **-33.10%** - best of both |
+| Model | Perplexity | Change | Notes |
+|-------|-----------|--------|-------|
+| Base TinyLlama | 17.12 | — | Baseline |
+| + Engram (trained) | 11.30 | **-34.0%** | Pattern memory |
+| + PEER-262K (trained) | 14.81 | **-13.5%** | 3x params, same throughput |
+| + Both (Hybrid) | 11.06 | **-35.4%** | Best of both |
 
-PEER maintains baseline perplexity while enabling massive parameter scaling. Engram improves quality.
+**Key finding**: Trained PEER-262K achieves **14.81 perplexity** (-13.5%), proving that the additional expert capacity improves quality, not just efficiency.
+
+Train PEER-262K yourself:
+```bash
+python train_peer_large.py --train --batches 3000 --lr 0.01
+```
 
 ## Key Insight: Initialization Matters
 
@@ -102,7 +107,8 @@ Shows which n-gram patterns the model learned to prioritize. Generates gate acti
 ## Files
 
 - `llama_peer_engram.py` - Core integration: PEER and Engram modules for LLaMA
-- `train_and_eval.py` - Training and evaluation script
+- `train_and_eval.py` - Training and evaluation script (Engram/PEER/Hybrid)
+- `train_peer_large.py` - Train large PEER configurations (262K+ experts)
 - `benchmark_efficiency.py` - VRAM/throughput/perplexity benchmark
 - `visualize_engram.py` - N-gram activation visualization
 

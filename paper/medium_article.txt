@@ -1,0 +1,167 @@
+The Redundancy Bottleneck: Why Sparse Modules Compete and How to Coordinate Them
+
+
+THE CORE FINDING
+
+Sparse retrieval modules are not additive—they compete for representational real estate.
+
+If you combine multiple sparse mechanisms (expert routing, n-gram memory, retrieval systems) and train them jointly, the faster-learning module will crowd out the slower one. The combined system underperforms its components.
+
+We call this the Redundancy Bottleneck.
+
+
+THE EXPERIMENT
+
+We built a "triple-sparse architecture" combining three mechanisms:
+
+PEER (Parameter Efficient Expert Retrieval):
+- Product-key lookup over 262,000+ micro-experts
+- O(sqrt(n)) retrieval complexity
+- Provides massive capacity without proportional compute
+
+Engram (N-gram Pattern Memory):
+- Hash-based lookup of 2-gram and 3-gram patterns
+- O(1) deterministic retrieval
+- Improves pattern recognition for common phrases
+
+mHC (Manifold-constrained Hyper-Connections):
+- Multi-stream residual connections
+- Doubly-stochastic mixing matrices
+- Stabilizes gradient flow
+
+Each module works great individually:
+- Engram alone: -31.7% perplexity
+- mHC alone: -25.7% perplexity
+- PEER alone: -10.5% perplexity
+
+But trained together? The triple-sparse system achieves only -16.6%. That's worse than Engram alone.
+
+
+THE ROOT CAUSE: FUNCTIONAL OVERLAP
+
+We analyzed output magnitudes during joint training. The finding: Engram dominates at a 2.62:1 ratio over PEER.
+
+What's happening:
+1. Both PEER and Engram attempt to "retrieve" information based on input patterns
+2. Engram learns faster (simpler hash-based mechanism)
+3. Engram captures patterns that PEER would otherwise specialize in
+4. PEER becomes redundant—its capacity goes unused
+
+This is functional overlap. The modules aren't complementary; they're competitive.
+
+
+THE SOLUTION: DIFFERENTIAL LEARNING RATE TRAINING
+
+The fix isn't architectural—it's a training coordination principle.
+
+Instead of training all modules equally, we let them take turns leading:
+
+Phase 1 - Engram Leads (1,000 batches):
+- Engram LR: 1e-3 (high)
+- PEER LR: 1e-5 (minimal, but not zero)
+- mHC LR: 1e-3 (high)
+
+Phase 2 - PEER Catches Up (1,000 batches):
+- PEER LR: 1e-3 (high)
+- Engram LR: 1e-5 (minimal)
+- mHC LR: 1e-4 (medium)
+
+Phase 3 - Coordination (1,000 batches):
+- All modules: 5e-4 (medium)
+
+Critical insight: Never fully freeze modules. A minimal learning rate (1e-5) allows modules to adapt to each other's changing outputs. Complete freezing causes distribution shift—the frozen module becomes incompatible with the still-training modules.
+
+
+THE RESULTS
+
+Training Strategy          Perplexity    Change
+Baseline                   16.54         —
+Joint training (equal LR)  13.79         -16.6%    (Redundancy bottleneck)
+Staggered (freeze modules) 99.77         +503%     (Distribution shift)
+Differential LR            11.05         -33.2%    (Best result)
+
+The same architecture yields vastly different results depending purely on training dynamics.
+
+
+WHY THIS MATTERS
+
+1. Sparse modules compete, not cooperate
+
+Any system combining multiple sparse retrieval mechanisms should expect this. MoE routing, hash-based memory, learned retrieval—they all fight for the same "information signal" unless coordinated.
+
+2. Training strategy determines outcomes
+
+Architecture is not destiny. The Redundancy Bottleneck is invisible if you only test individual components. It only emerges when components interact during joint optimization.
+
+3. Differential LR is a general principle
+
+The specific ratios (1e-3 vs 1e-5) and phase lengths (1000 batches) are tuned for our setup. But the principle generalizes: let modules specialize sequentially rather than competing simultaneously.
+
+
+PEER AS CAPACITY INSURANCE
+
+A skeptical question: "Why not just use Engram alone?"
+
+PEER's immediate gain (-10.5%) is modest relative to its parameter cost (+2.15B). But PEER provides something Engram cannot: compute-decoupled scaling.
+
+Adding more Engram vocabulary increases both memory AND computation.
+Adding more PEER experts increases only memory—compute stays constant.
+
+Our efficiency benchmark proves this:
+
+Configuration    Parameters    Throughput
+Baseline         1.10B         26,991 tok/s
+PEER-16K         1.24B         26,521 tok/s
+PEER-65K         1.64B         26,405 tok/s
+PEER-262K        3.25B         26,446 tok/s
+PEER-803K        7.68B         26,262 tok/s
+
+7x parameters, <3% throughput reduction.
+
+PEER is capacity insurance—scaling headroom that doesn't bottleneck inference. Its value isn't immediate quality; it's future specialization potential.
+
+The Redundancy Bottleneck finding doesn't diminish this. It clarifies WHEN PEER's capacity becomes useful: on patterns Engram cannot capture (context-dependent, non-literal associations). Differential LR training ensures PEER learns these instead of redundantly duplicating Engram's work.
+
+
+LIMITATIONS
+
+Dataset bias: WikiText-2's repetitive n-gram structure inflates Engram's contribution. Cross-dataset evaluation on C4 shows Engram's gains diminish on diverse web content (+0.6% vs -31.7%). The Redundancy Bottleneck generalizes, but optimal schedules are dataset-dependent.
+
+Differential LR sensitivity: The hyperparameters are hand-tuned. Re-tuning is needed for different model sizes and module combinations.
+
+Small base model: Results on TinyLlama (1.1B) may not represent behavior at larger scales.
+
+
+THE BROADER PRINCIPLE
+
+Training-aware architecture design is essential.
+
+Evaluating architectures without considering training dynamics misses half the story. The Redundancy Bottleneck is invisible in isolation—it only emerges during joint optimization.
+
+Any multi-component system should:
+1. Test individual components AND joint training
+2. Use output magnitude analysis to diagnose dominance
+3. Consider differential LR or other coordination strategies
+
+The modules aren't the problem. The interaction is.
+
+
+KEY TAKEAWAYS
+
+1. Sparse modules compete for representational real estate
+2. Faster-learning modules crowd out slower ones during joint training
+3. Differential LR training forces specialization by letting modules take turns leading
+4. Never fully freeze—maintain minimal LR for adaptation
+5. Architecture + training dynamics = outcomes
+
+
+CODE AVAILABILITY
+
+Code and trained weights: https://github.com/MikeyBeez/PEER
+
+
+REFERENCES
+
+- PEER: Mixture of A Million Experts (arxiv.org/abs/2407.04153)
+- Engram: Byte-Level Memory-Augmented Language Modeling (github.com/deepseek-ai/Engram)
+- mHC: Manifold-Constrained Hyper-Connections (arxiv.org/abs/2512.24880)

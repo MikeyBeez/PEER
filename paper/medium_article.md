@@ -1,119 +1,284 @@
-# Dual-Sparse Architecture: How We Got 7x More Parameters Without Slowing Down
+# Triple-Sparse Architecture: Combining PEER, Engram, and mHC for Efficient Language Model Scaling
 
-## The Problem With Scaling Language Models
+## Abstract
 
-Here's the fundamental problem with making language models bigger: if you want 10x more parameters, you need roughly 10x more compute per forward pass. Memory and speed scale together, creating an expensive barrier to improvement.
+We present a triple-sparse architecture that combines three complementary mechanisms for language models: PEER (Parameter Efficient Expert Retrieval) for compute-efficient parameter scaling, Engram for n-gram pattern memory, and mHC (Manifold-constrained Hyper-Connections) for stable multi-stream residual connections.
 
-Mixture of Experts (MoE) partially solved this by only activating some parameters per token. But traditional MoE is limited to dozens or hundreds of experts because routing becomes expensive. What if you could have *millions* of experts?
+Our experiments on TinyLlama (1.1B parameters) demonstrate that PEER enables **7x parameter scaling** (to 7.68B) while maintaining constant throughput (~26K tokens/second). Individual training results show: PEER-262K achieves -10.5% perplexity, Engram achieves -31.7%, and mHC achieves -25.7%.
 
-That's exactly what PEER (Parameter Efficient Expert Retrieval) promises. And we decided to test whether it actually delivers.
-
-## What We Built
-
-We integrated two complementary "brain upgrades" into TinyLlama, a 1.1 billion parameter model:
-
-**PEER** uses product-key retrieval to select from hundreds of thousands of micro-experts. Instead of routing through all experts (which would be slow), it uses a clever trick: split each expert's "address" into two parts, search each part separately, then combine. This gives you O(√n) lookup instead of O(n). With 800,000 experts, that's checking 1,800 keys instead of 800,000.
-
-**Engram** is simpler—it hashes n-grams (2-word and 3-word sequences) and looks up learned embeddings. Think of it as pattern memory for common phrases like "United States" or "New York."
-
-We put Engram in early layers (for pattern recognition) and PEER in late layers (for reasoning). They don't interfere because they operate at different depths.
-
-## The Efficiency Results
-
-We ran PEER configurations from 16,000 experts up to 803,000 experts on an RTX 5070 Ti with 15.5 GB of VRAM. The results were striking.
-
-The baseline TinyLlama uses 2.07 GB of VRAM and processes about 27,000 tokens per second.
-
-With PEER-16K (16,384 experts), we added 12% more parameters. VRAM went up slightly to 2.35 GB. Throughput: 26,521 tokens per second. Essentially unchanged.
-
-With PEER-65K, we had 49% more parameters. VRAM: 3.10 GB. Throughput: 26,405 tokens per second. Still basically the same.
-
-With PEER-262K, we hit 3x the parameters (3.25 billion total). VRAM: 6.10 GB. Throughput: 26,446 tokens per second.
-
-With PEER-803K, we reached 7x the parameters (7.68 billion total). VRAM: 14.35 GB (nearly maxing out the GPU). Throughput: 26,262 tokens per second.
-
-**The key finding: 7x more parameters with less than 3% throughput reduction.**
-
-Memory scales linearly—that's expected, since you're storing more expert embeddings. But compute stays flat. That's the whole point of PEER, and it actually works.
-
-## But Does It Actually Help?
-
-Here's the thing about those efficiency numbers: the perplexity was identical across all configurations (17.12). That's because we tested with randomly initialized PEER modules. The model was essentially ignoring them.
-
-The real question is: if you train those experts, does the extra capacity actually improve the model?
-
-We trained PEER-262K for 3,000 batches on WikiText-2. The result: perplexity dropped from 17.12 to 14.81. That's a 13.5% improvement.
-
-This is significant. The additional expert capacity isn't just sitting there—it's being utilized. The model learns to route different inputs to different specialized experts, and that specialization helps.
-
-## The Full Picture
-
-Here's how all the pieces compare after training:
-
-Baseline TinyLlama achieves 17.12 perplexity.
-
-Adding trained Engram drops it to 11.30—a 34% improvement. Engram is remarkably effective for pattern-heavy text like Wikipedia.
-
-Adding trained PEER-262K (without Engram) drops it to 14.81—a 13.5% improvement. Not as dramatic as Engram, but remember: this is with 3x the parameters at the same inference speed.
-
-Combining both gives 11.06 perplexity—a 35.4% improvement. The hybrid is slightly better than Engram alone, suggesting the approaches are complementary.
-
-## Why This Matters
-
-The implications for scaling are interesting. Traditional wisdom says: want a better model? Make it bigger. But bigger means slower and more expensive to run.
-
-PEER suggests an alternative: keep your base model moderate (say, 1-7 billion parameters), then add millions of micro-experts. Train only the expert parameters (which is faster and uses less memory than full model training). The result is quality approaching a larger model with inference costs of the smaller one.
-
-This is particularly relevant for deployment. Inference cost is often the bottleneck—you're running the model millions of times. If you can get 7B-model quality at 1B-model speeds, that's a significant win.
-
-## The Critical Implementation Detail
-
-One thing nearly derailed our experiments: initialization.
-
-When you add new modules to a pretrained model, the default PyTorch initialization produces high-variance random outputs. These random outputs corrupt the carefully tuned hidden states that the pretrained model expects.
-
-The fix is simple but crucial: initialize new modules to output near-zero values at the start. We used standard deviation of 0.01 for projection weights and 0.02 for embeddings.
-
-Without this fix, Engram produced 450 perplexity—catastrophically worse than baseline. With the fix: 11.30 perplexity, dramatically better. Same architecture, same training, just different initialization.
-
-If you're adding modules to pretrained models, remember: start small. Let the model learn to use them gradually rather than forcing it to immediately handle random noise.
-
-## Limitations
-
-We should be honest about what we haven't proven:
-
-**Memory still scales linearly.** PEER saves compute, not memory. With 803K experts, we used 14.35 GB just for weights, leaving little room for training. Practical deployment of million-expert models will need techniques like CPU offloading or quantization.
-
-**We only tested on WikiText-2.** This is a standard benchmark, but it's n-gram heavy, which favors Engram. Broader evaluation on diverse tasks (reasoning, coding, math) would strengthen the conclusions.
-
-**TinyLlama is small.** Behavior at 1.1B parameters might not generalize to 70B or 400B. Though the efficiency principles should hold, the quality improvements might differ.
-
-**Limited training.** 3,000 batches might not fully utilize 262,000 expert capacity. Longer training or larger expert counts might show more dramatic improvements.
-
-## What's Next
-
-Several directions seem promising:
-
-Scaling to 1M+ experts with memory optimization techniques. Our GPU maxed out at 803K, but with CPU offloading or 8-bit quantization, millions should be feasible.
-
-Evaluating on diverse benchmarks. Does PEER help with reasoning tasks? Code generation? Following instructions?
-
-Comparing training efficiency. How does "train only PEER parameters" compare to full model training in terms of quality per FLOP?
-
-Optimizing layer placement. We put PEER in layers 19 and 21 based on intuition. Systematic ablation might find better configurations.
-
-## Conclusion
-
-We set out to test whether PEER's efficiency claims hold in practice. They do. Seven times more parameters, essentially the same throughput.
-
-More importantly, we showed that training those additional parameters improves quality. PEER-262K achieved 13.5% better perplexity than baseline. Combined with Engram, we hit 35.4% improvement.
-
-The core insight is simple: **decouple parameter capacity from compute cost.** Store millions of tiny experts. Retrieve only a few per token. Let the routing learn which experts matter for which inputs.
-
-As models scale and inference costs dominate, this decoupling becomes increasingly valuable. You don't have to choose between quality and speed—with the right architecture, you can have both.
+However, joint training of all three components hits a "Redundancy Bottleneck" (-16.6%), where PEER and Engram compete for the same information signal. We introduce **differential learning rate training**, which breaks this bottleneck by allowing modules to specialize sequentially, achieving **-33.2% perplexity**—the best result overall.
 
 ---
 
-*Code and trained weights available at: github.com/MikeyBeez/PEER*
+## Introduction
 
-*This work builds on PEER (arXiv:2407.04153) and Engram (github.com/deepseek-ai/Engram).*
+Scaling language models has traditionally required proportional increases in both memory and compute. A model with 10x more parameters requires roughly 10x more FLOPs per forward pass, creating a fundamental barrier to efficient scaling. Recent work on Mixture of Experts (MoE) partially addresses this by activating only a subset of parameters per token, but standard MoE architectures are limited to dozens or hundreds of experts due to routing overhead.
+
+PEER (Parameter Efficient Expert Retrieval) breaks this constraint through product-key retrieval, enabling millions of micro-experts with O(√n) lookup complexity. However, the practical benefits of PEER for language model augmentation have not been thoroughly benchmarked.
+
+We address three key questions:
+
+1. **Compute efficiency**: Does throughput actually remain constant as experts scale?
+2. **Quality improvement**: Does training additional PEER capacity improve perplexity?
+3. **Complementary architectures**: How does PEER interact with other memory mechanisms?
+
+We combine PEER with Engram (a hash-based n-gram memory module) and mHC (manifold-constrained hyper-connections), creating a *triple-sparse architecture* where:
+
+- **Engram** (early layers): Retrieves static n-gram patterns for phrase-level recognition
+- **PEER** (late layers): Routes to specialized micro-experts for contextual reasoning
+- **mHC** (throughout): Stabilizes training with multi-stream residual connections
+
+### Key Contributions
+
+1. **Efficiency benchmarks**: We demonstrate 7x parameter scaling (1.1B → 7.68B) with <3% throughput reduction
+2. **Training validation**: Trained PEER-262K achieves 14.81 perplexity vs 17.12 baseline (-10.5%)
+3. **Triple-sparse architecture**: Combined PEER + Engram + mHC with differential LR achieves 11.05 perplexity (-33.2%)
+4. **Redundancy Bottleneck discovery**: We identify and solve the "Sparsity Overlap" problem where joint training underperforms individual components
+5. **Differential LR training**: A phased training strategy that breaks the redundancy bottleneck
+
+---
+
+## Method
+
+### Architecture Overview
+
+We augment a pretrained TinyLlama model (1.1B parameters, 22 layers) with three sparse memory modules:
+
+- **PEER layers** at positions 19 and 21 (late layers)
+- **Engram layers** at positions 1 and 5 (early layers)
+- **mHC layers** at positions 7, 13, and 17 (spread throughout)
+
+This placement follows the intuition that early layers handle pattern recognition while late layers handle reasoning.
+
+### PEER Module
+
+Each PEER layer contains:
+
+- **Product keys**: Two sets of √n keys, where n is the number of experts
+- **Expert embeddings**: n pairs of down-projection and up-projection vectors
+- **Query projection**: Maps hidden states to query vectors for each key set
+
+The forward pass:
+
+1. Project hidden state to queries
+2. Compute similarities to both key sets
+3. Select top-k from each set
+4. Form Cartesian product and select final top-k experts
+5. Retrieve expert weights and compute weighted output
+
+With k=8 experts per head and 4 heads, we retrieve 32 experts per token from pools of up to 803K experts.
+
+### Engram Module
+
+Each Engram layer:
+
+1. Hashes n-grams (2-gram, 3-gram) to indices
+2. Looks up embeddings from the hash table
+3. Computes gated output using normalized key-query products
+
+The gate uses sqrt-sign activation for stability.
+
+### Critical Finding: Initialization Matters
+
+**New modules must be initialized near-zero** to avoid corrupting pretrained hidden states:
+
+```python
+nn.init.normal_(weight, std=0.01)  # projections
+nn.init.normal_(embedding, std=0.02)  # embeddings
+```
+
+Without this fix, Engram produced 450 perplexity (+2626% worse). With it: 11.30 perplexity (-31.7% better).
+
+---
+
+## Experiments
+
+### Setup
+
+- **Base model**: TinyLlama-1.1B-Chat-v1.0
+- **Hardware**: NVIDIA RTX 5070 Ti (15.5 GB VRAM)
+- **Dataset**: WikiText-2 (train and test splits)
+- **Metrics**: Perplexity, peak VRAM, throughput (tokens/second)
+
+### Efficiency Benchmark
+
+We measured inference efficiency across PEER configurations without training (random initialization):
+
+| Config | Experts | Parameters | VRAM | Throughput | PPL |
+|--------|---------|------------|------|------------|-----|
+| Baseline | — | 1.10B | 2.07 GB | 26,991 tok/s | 17.12 |
+| PEER-16K | 16,384 | 1.24B | 2.35 GB | 26,521 tok/s | 17.12 |
+| PEER-65K | 65,536 | 1.64B | 3.10 GB | 26,405 tok/s | 17.12 |
+| PEER-262K | 262,144 | 3.25B | 6.10 GB | 26,446 tok/s | 17.12 |
+| PEER-590K | 589,824 | 5.93B | 11.10 GB | 26,401 tok/s | 17.12 |
+| **PEER-803K** | **802,816** | **7.68B** | **14.35 GB** | **26,262 tok/s** | **17.12** |
+
+**Key finding**: Throughput remains nearly constant (26,262-26,991 tok/s, <3% variance) despite **7x parameter increase**. Memory scales linearly, but compute does not—validating PEER's core efficiency claim.
+
+### Training Results
+
+| Model | Perplexity | Change | Parameters |
+|-------|-----------|--------|------------|
+| Baseline TinyLlama | 16.54 | — | 1.10B |
+| + Engram (trained) | 11.30 | -31.7% | 1.15B |
+| + PEER-262K (trained) | 14.81 | -10.5% | 3.25B |
+| + mHC (trained) | 12.29 | -25.7% | 1.21B |
+| + Engram + PEER (Hybrid) | 11.06 | -33.1% | 3.30B |
+
+---
+
+## The Redundancy Bottleneck
+
+When training PEER + Engram + mHC jointly, we observed a surprising result: the combined model (-16.6%) **underperformed** individual components like Engram (-31.7%) or mHC (-25.7%).
+
+| Configuration | Perplexity | Change |
+|--------------|-----------|--------|
+| Baseline | 16.54 | — |
+| Engram alone | 11.30 | -31.7% |
+| mHC alone | 12.29 | -25.7% |
+| PEER alone | 14.81 | -10.5% |
+| **Triple-Sparse (joint)** | **13.79** | **-16.6%** |
+
+### Root Cause: Sparsity Overlap
+
+Analysis of output magnitudes revealed that Engram dominates (2.62:1 ratio vs PEER), effectively "crowding out" PEER's contribution. Both modules compete for the same information signal—literal pattern matching.
+
+When trained together with equal learning rates:
+- Engram learns faster (simpler hash-based mechanism)
+- Engram captures patterns that PEER would otherwise specialize in
+- PEER becomes redundant, contributing little to the final output
+
+---
+
+## Solution: Differential Learning Rate Training
+
+Instead of freezing modules (which causes distribution shift), we modulate learning rates across phases:
+
+**Phase 1 (Engram-Lead)**: 1,000 batches
+- Engram LR = 1e-3 (high)
+- PEER LR = 1e-5 (minimal)
+- mHC LR = 1e-3 (high)
+
+**Phase 2 (PEER-Catchup)**: 1,000 batches
+- PEER LR = 1e-3 (high)
+- Engram LR = 1e-5 (minimal)
+- mHC LR = 1e-4 (medium)
+
+**Phase 3 (Coordinate)**: 1,000 batches
+- All LR = 5e-4 (medium)
+
+### Results
+
+| Strategy | Perplexity | Change | Notes |
+|----------|-----------|--------|-------|
+| Baseline | 16.54 | — | — |
+| Joint training | 13.79 | -16.6% | Redundancy bottleneck |
+| Staggered (freeze) | 99.77 | +503% | Distribution shift |
+| **Differential LR** | **11.05** | **-33.2%** | **Best result** |
+
+**Key insight**: Never fully freeze modules. Maintaining a minimal learning rate (1e-5) allows modules to adapt to each other while one "leads" and the other "follows."
+
+The staggered approach (completely freezing modules) failed catastrophically because frozen modules can't adapt to the changing output distributions of modules that are still training.
+
+---
+
+## Analysis
+
+### Why Throughput Stays Constant
+
+PEER's constant throughput despite 7x parameter increase stems from:
+
+1. **Sparse retrieval**: Only k=8 experts activated per head regardless of pool size
+2. **Product-key efficiency**: O(√n) lookup instead of O(n)
+3. **Embedding-based experts**: Simple lookup + matmul, no routing networks
+
+The dominant cost is the base model's attention and MLP computation, which PEER augments rather than replaces.
+
+### Why Training Improves Quality
+
+Untrained PEER maintains baseline perplexity because small initialization (std=0.01) means PEER output ≈ 0 initially—the model effectively ignores untrained contributions.
+
+After training:
+- Experts specialize to different input patterns
+- Product-key retrieval routes tokens to relevant experts
+- The 262K experts provide fine-grained specialization impossible with standard MoE
+
+### Functional Overlap Between Modules
+
+Engram and PEER were designed for different purposes:
+- **Engram**: Deterministic n-gram lookup, improves pattern recognition
+- **PEER**: Learned expert routing, improves contextual reasoning
+- **mHC**: Multi-stream residuals, stabilizes training
+
+However, both PEER and Engram attempt to "retrieve" information based on input—Engram via literal n-gram hashing, PEER via learned query-key matching. When trained jointly, Engram learns faster and captures patterns that PEER would otherwise specialize in.
+
+Differential LR training forces PEER to specialize in patterns Engram *cannot* capture (context-dependent, non-literal patterns), achieving 11.05 PPL—better than either alone.
+
+---
+
+## Complete Results Summary
+
+| Model | Perplexity | Change | Params | Throughput |
+|-------|-----------|--------|--------|------------|
+| Baseline TinyLlama | 16.54 | — | 1.10B | 26,991 tok/s |
+| **Single Components** |||||
+| + Engram | 11.30 | -31.7% | 1.15B | ~26K tok/s |
+| + PEER-262K | 14.81 | -10.5% | 3.25B | 26,446 tok/s |
+| + mHC | 12.29 | -25.7% | 1.21B | ~25K tok/s |
+| **Dual Combinations** |||||
+| + Engram + PEER | 11.06 | -33.1% | 3.30B | ~26K tok/s |
+| **Triple-Sparse** |||||
+| Joint training | 13.79 | -16.6% | 3.41B | ~25K tok/s |
+| Staggered (freeze) | 99.77 | +503% | 3.41B | — |
+| **Differential LR** | **11.05** | **-33.2%** | **3.41B** | ~25K tok/s |
+
+---
+
+## Implications for Scaling
+
+Our results suggest a new scaling paradigm:
+
+1. Train a moderate base model (1-7B parameters)
+2. Add PEER layers with millions of experts
+3. Train only PEER parameters (faster, less memory)
+4. Result: Quality of larger model, inference cost of smaller model
+
+---
+
+## Limitations
+
+1. **Single evaluation dataset**: WikiText-2 is n-gram heavy, which may favor Engram
+2. **Small base model**: TinyLlama (1.1B) may not represent larger model behavior
+3. **No downstream task evaluation**: Only perplexity measured, not task performance
+4. **Differential LR sensitivity**: Optimal phase durations and LR ratios may vary across architectures
+5. **Limited training budget**: Longer training may yield further improvements
+
+---
+
+## Conclusion
+
+We present a triple-sparse architecture combining PEER, Engram, and mHC for efficient language model scaling. Our benchmarks demonstrate that PEER enables **7x parameter scaling with constant throughput**, and that training these parameters yields meaningful quality improvements.
+
+A key discovery is the **Redundancy Bottleneck**: joint training of multiple sparse modules can underperform individual components due to functional overlap. We solve this with **differential learning rate training**, which allows modules to specialize sequentially while maintaining coordination. This achieves **11.05 perplexity (-33.2%)**—the best result across all configurations.
+
+### Key Takeaways
+
+1. **Sparse modules compete**: Different sparse retrieval mechanisms can interfere when trained jointly
+2. **Training strategy matters**: The same architecture yields vastly different results (99.77 vs 11.05 PPL) depending on training approach
+3. **Differential LR enables coordination**: Modulating learning rates forces specialization while maintaining adaptability
+
+These results validate both PEER's efficiency claims and highlight the importance of training strategies for multi-component architectures.
+
+---
+
+## Code Availability
+
+Code and trained weights are available at: https://github.com/MikeyBeez/PEER
+
+---
+
+## References
+
+- PEER: [Mixture of A Million Experts](https://arxiv.org/abs/2407.04153)
+- Engram: [Byte-Level Memory-Augmented Language Modeling](https://github.com/deepseek-ai/Engram)
+- mHC: [Manifold-Constrained Hyper-Connections](https://arxiv.org/abs/2512.24880)

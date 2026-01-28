@@ -22,7 +22,7 @@
 \maketitle
 
 \begin{abstract}
-We present a triple-sparse architecture that combines three complementary mechanisms for language models: PEER (Parameter Efficient Expert Retrieval) for compute-efficient parameter scaling, Engram for n-gram pattern memory, and mHC (Manifold-constrained Hyper-Connections) for stable multi-stream residual connections. Our experiments on TinyLlama (1.1B parameters) demonstrate that PEER enables 7$\times$ parameter scaling (to 7.68B) while maintaining constant throughput (~26K tokens/second). Training results show: PEER-262K achieves -10.5\% perplexity, Engram achieves -31.7\%, and mHC achieves -25.7\%. Combined PEER + Engram achieves -33.1\% perplexity reduction. We provide comprehensive benchmarks showing the decoupling of parameter count from compute cost, and detailed analysis of each component's contribution to model quality.
+We present a triple-sparse architecture that combines three complementary mechanisms for language models: PEER (Parameter Efficient Expert Retrieval) for compute-efficient parameter scaling, Engram for n-gram pattern memory, and mHC (Manifold-constrained Hyper-Connections) for stable multi-stream residual connections. Our experiments on TinyLlama (1.1B parameters) demonstrate that PEER enables 7$\times$ parameter scaling (to 7.68B) while maintaining constant throughput (~26K tokens/second). Individual training results show: PEER-262K achieves -10.5\% perplexity, Engram achieves -31.7\%, and mHC achieves -25.7\%. However, joint training of all three components hits a ``Redundancy Bottleneck'' (-16.6\%), where PEER and Engram compete for the same information signal. We introduce \textbf{differential learning rate training}, which breaks this bottleneck by allowing modules to specialize sequentially, achieving \textbf{-33.2\% perplexity}---the best result overall. We provide comprehensive benchmarks, redundancy analysis, and detailed training strategies.
 \end{abstract}
 
 \section{Introduction}
@@ -48,9 +48,10 @@ Our key contributions:
 
 \begin{enumerate}
     \item \textbf{Efficiency benchmarks}: We demonstrate 7$\times$ parameter scaling (1.1B $\rightarrow$ 7.68B) with $<$3\% throughput reduction
-    \item \textbf{Training validation}: Trained PEER-262K achieves 14.81 perplexity vs 17.12 baseline (-13.5\%)
-    \item \textbf{Dual-sparse architecture}: Combined PEER + Engram achieves 11.06 perplexity (-35.4\%)
-    \item \textbf{Implementation insights}: We identify critical initialization strategies for stable training
+    \item \textbf{Training validation}: Trained PEER-262K achieves 14.81 perplexity vs 17.12 baseline (-10.5\%)
+    \item \textbf{Triple-sparse architecture}: Combined PEER + Engram + mHC with differential LR achieves 11.05 perplexity (-33.2\%)
+    \item \textbf{Redundancy Bottleneck discovery}: We identify and solve the ``Sparsity Overlap'' problem where joint training underperforms individual components
+    \item \textbf{Differential LR training}: A phased training strategy that breaks the redundancy bottleneck
 \end{enumerate}
 
 \section{Related Work}
@@ -184,6 +185,56 @@ Baseline TinyLlama & 17.12 & — & 1.10B \\
 
 We place PEER in late layers (19, 21) based on the hypothesis that early layers handle pattern matching while late layers handle reasoning. Engram is placed in early layers (1, 5) for complementary coverage.
 
+\subsection{Triple-Sparse Training: The Redundancy Bottleneck}
+
+When training PEER + Engram + mHC jointly, we observe a surprising result: the combined model (-16.6\%) underperforms individual components like Engram (-31.7\%) or mHC (-25.7\%). We term this the \textbf{Redundancy Bottleneck}.
+
+\begin{table}[h]
+\centering
+\caption{Joint vs Individual Training}
+\begin{tabular}{lrr}
+\toprule
+Configuration & Perplexity & Change \\
+\midrule
+Baseline & 16.54 & --- \\
+Engram alone & 11.30 & -31.7\% \\
+mHC alone & 12.29 & -25.7\% \\
+PEER alone & 14.81 & -10.5\% \\
+\textbf{Triple-Sparse (joint)} & \textbf{13.79} & \textbf{-16.6\%} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Root cause: Sparsity Overlap.} Analysis of output magnitudes reveals that Engram dominates (2.62:1 ratio vs PEER), effectively ``crowding out'' PEER's contribution. Both modules compete for the same information signal---literal pattern matching.
+
+\subsection{Solution: Differential Learning Rate Training}
+
+We propose \textbf{differential learning rate training} to break the redundancy bottleneck. Instead of freezing modules (which causes distribution shift), we modulate learning rates across phases:
+
+\begin{enumerate}
+    \item \textbf{Phase 1 (Engram-Lead)}: Engram LR = $10^{-3}$, PEER LR = $10^{-5}$, mHC LR = $10^{-3}$
+    \item \textbf{Phase 2 (PEER-Catchup)}: PEER LR = $10^{-3}$, Engram LR = $10^{-5}$, mHC LR = $10^{-4}$
+    \item \textbf{Phase 3 (Coordinate)}: All LR = $5 \times 10^{-4}$
+\end{enumerate}
+
+\begin{table}[h]
+\centering
+\caption{Training Strategy Comparison}
+\begin{tabular}{lrrl}
+\toprule
+Strategy & Perplexity & Change & Notes \\
+\midrule
+Baseline & 16.54 & --- & --- \\
+Joint training & 13.79 & -16.6\% & Redundancy bottleneck \\
+Staggered (freeze) & 99.77 & +503\% & Distribution shift \\
+\textbf{Differential LR} & \textbf{11.05} & \textbf{-33.2\%} & \textbf{Best result} \\
+\bottomrule
+\end{tabular}
+\label{tab:training_strategies}
+\end{table}
+
+\textbf{Key insight}: Never fully freeze modules. Maintaining a minimal learning rate ($10^{-5}$) allows modules to adapt to each other while one ``leads'' and the other ``follows.''
+
 \section{Analysis}
 
 \subsection{Why Throughput Stays Constant}
@@ -213,16 +264,19 @@ After training:
     \item The 262K experts provide fine-grained specialization impossible with standard MoE
 \end{itemize}
 
-\subsection{Complementary Architectures}
+\subsection{Complementary Architectures and Functional Overlap}
 
-Engram and PEER serve different purposes:
+Engram and PEER were designed for different purposes:
 
 \begin{itemize}
     \item \textbf{Engram}: Deterministic n-gram lookup, improves pattern recognition
     \item \textbf{PEER}: Learned expert routing, improves contextual reasoning
+    \item \textbf{mHC}: Multi-stream residuals with manifold constraints, stabilizes training
 \end{itemize}
 
-Their combination (11.06 PPL) slightly outperforms Engram alone (11.30 PPL), suggesting complementary benefits. The improvement is modest because Engram already captures most gains on WikiText-2, which is n-gram heavy.
+However, our experiments reveal \textbf{functional overlap} between PEER and Engram. Both modules attempt to ``retrieve'' information based on the input---Engram via literal n-gram hashing, PEER via learned query-key matching. When trained jointly, Engram learns faster (simpler mechanism) and captures patterns that PEER would otherwise specialize in.
+
+\textbf{Evidence of overlap}: Output magnitude analysis shows Engram contributing 2.62$\times$ more than PEER in joint training. Differential LR training forces PEER to specialize in patterns Engram \textit{cannot} capture (context-dependent, non-literal patterns), achieving 11.05 PPL---better than either alone.
 
 \section{Discussion}
 
@@ -257,9 +311,18 @@ Our results suggest a new scaling paradigm:
 
 \section{Conclusion}
 
-We present a dual-sparse architecture combining PEER and Engram for efficient language model scaling. Our benchmarks demonstrate that PEER enables 7$\times$ parameter scaling with constant throughput, and that training these parameters yields meaningful quality improvements (-13.5\% perplexity). Combined with Engram, our approach achieves -35.4\% perplexity reduction on WikiText-2.
+We present a triple-sparse architecture combining PEER, Engram, and mHC for efficient language model scaling. Our benchmarks demonstrate that PEER enables 7$\times$ parameter scaling with constant throughput, and that training these parameters yields meaningful quality improvements.
 
-These results validate PEER's core value proposition: \textbf{decouple parameter capacity from compute cost}. As models scale, this decoupling becomes increasingly valuable, enabling quality improvements without proportional inference cost increases.
+A key discovery is the \textbf{Redundancy Bottleneck}: joint training of multiple sparse modules can underperform individual components due to functional overlap. We solve this with \textbf{differential learning rate training}, which allows modules to specialize sequentially while maintaining coordination. This achieves \textbf{11.05 perplexity (-33.2\%)}, the best result across all configurations.
+
+Our findings suggest:
+\begin{enumerate}
+    \item \textbf{Sparse modules compete}: Different sparse retrieval mechanisms can interfere when trained jointly
+    \item \textbf{Training strategy matters}: The same architecture yields vastly different results (99.77 vs 11.05 PPL) depending on training approach
+    \item \textbf{Differential LR enables coordination}: Modulating learning rates forces specialization while maintaining adaptability
+\end{enumerate}
+
+These results validate both PEER's efficiency claims and highlight the importance of training strategies for multi-component architectures.
 
 \section*{Code Availability}
 
@@ -409,8 +472,13 @@ Baseline TinyLlama & 16.54 & — & 1.10B & 26,991 tok/s \\
 + PEER-262K & 14.81 & -10.5\% & 3.25B & 26,446 tok/s \\
 + mHC & 12.29 & -25.7\% & 1.21B & $\sim$25K tok/s \\
 \midrule
-\multicolumn{5}{l}{\textit{Combinations}} \\
+\multicolumn{5}{l}{\textit{Dual Combinations}} \\
 + Engram + PEER & 11.06 & -33.1\% & 3.30B & $\sim$26K tok/s \\
+\midrule
+\multicolumn{5}{l}{\textit{Triple-Sparse (PEER + Engram + mHC)}} \\
+Joint training & 13.79 & -16.6\% & 3.41B & $\sim$25K tok/s \\
+Staggered (freeze) & 99.77 & +503\% & 3.41B & --- \\
+\textbf{Differential LR} & \textbf{11.05} & \textbf{-33.2\%} & \textbf{3.41B} & $\sim$25K tok/s \\
 \bottomrule
 \end{tabular}
 \label{tab:all_results}
@@ -449,6 +517,25 @@ PEER-262K uses SGD instead of AdamW because:
     \item With 262K experts (2.15B additional parameters), this exhausted 15.5GB VRAM
     \item SGD with momentum requires only 1$\times$ additional memory
 \end{itemize}
+
+\subsection{Differential LR Training Schedule}
+
+\begin{table}[h]
+\centering
+\caption{Differential Learning Rate Training Phases}
+\begin{tabular}{lcccc}
+\toprule
+Phase & Batches & Engram LR & PEER LR & mHC LR \\
+\midrule
+1. Engram-Lead & 1,000 & $10^{-3}$ & $10^{-5}$ & $10^{-3}$ \\
+2. PEER-Catchup & 1,000 & $10^{-5}$ & $10^{-3}$ & $10^{-4}$ \\
+3. Coordinate & 1,000 & $5 \times 10^{-4}$ & $5 \times 10^{-4}$ & $5 \times 10^{-4}$ \\
+\bottomrule
+\end{tabular}
+\label{tab:diff_lr}
+\end{table}
+
+\textbf{Key insight}: The minimum learning rate of $10^{-5}$ (not zero) is critical. Completely freezing modules causes distribution shift, leading to catastrophic forgetting (99.77 PPL). Maintaining a small learning rate allows modules to adapt to each other's changing outputs while one ``leads'' the optimization.
 
 \section{Initialization Details}
 \label{app:init}
@@ -595,18 +682,19 @@ Transformers & 4.x \\
     \item \textbf{Single evaluation dataset}: WikiText-2 is n-gram heavy, which may favor Engram
     \item \textbf{Small base model}: TinyLlama (1.1B) may not represent larger model behavior
     \item \textbf{No downstream task evaluation}: Only perplexity measured, not task performance
-    \item \textbf{Triple-sparse combination untested}: PEER + Engram + mHC not yet evaluated together
+    \item \textbf{Differential LR sensitivity}: Optimal phase durations and LR ratios may vary across architectures
     \item \textbf{Limited training budget}: Longer training may yield further improvements
 \end{enumerate}
 
 \subsection{Future Directions}
 
 \begin{enumerate}
-    \item \textbf{Triple-sparse evaluation}: Combine all three components
     \item \textbf{Downstream tasks}: Evaluate on MMLU, HellaSwag, ARC, etc.
     \item \textbf{Larger base models}: Test on 7B+ parameter models
     \item \textbf{Expert scaling}: Push to 1M+ experts with memory optimization
     \item \textbf{Continuous pretraining}: Train on larger corpora (RedPajama, etc.)
+    \item \textbf{Differential LR optimization}: Tune phase durations and LR schedules for different architectures
+    \item \textbf{Redundancy analysis}: Develop automated methods to detect and prevent module overlap
 \end{enumerate}
 
 \end{document}

@@ -244,6 +244,19 @@ Staggered (freeze) & 99.77 & +503\% & Distribution shift \\
 
 \textbf{Key insight}: Never fully freeze modules. Maintaining a minimal learning rate ($10^{-5}$) allows modules to adapt to each other while one ``leads'' and the other ``follows.''
 
+\subsection{The Redundancy Bottleneck in Abstract Terms}
+
+The Redundancy Bottleneck is a special case of a more general phenomenon: \textbf{when multiple modules compete to explain the same signal under a shared loss, the fastest learner wins}. The slower module's gradients diminish as the loss decreases, starving it of learning signal before it can specialize.
+
+This connects to several known failure modes in deep learning:
+\begin{itemize}
+    \item \textbf{Shortcut learning}: Simple features dominate because they reduce loss faster
+    \item \textbf{Representation collapse}: Multiple heads/experts converge to identical functions
+    \item \textbf{Early layer dominance}: In deep supervision, early classifiers can starve later ones
+\end{itemize}
+
+The mental model: \textit{without coordination, multiple sparse modules act like parallel classifiers racing to minimize loss. The fastest one collapses the error signal, starving the others of gradient.} Differential LR training breaks this race by giving each module a protected learning window.
+
 \section{Analysis}
 
 \subsection{Why Throughput Stays Constant}
@@ -282,6 +295,8 @@ Engram and PEER were designed for different purposes:
     \item \textbf{PEER}: Learned expert routing, improves contextual reasoning
     \item \textbf{mHC}: Multi-stream residuals with manifold constraints, stabilizes training
 \end{itemize}
+
+\textbf{Why mHC matters}: While mHC's -25.7\% improvement is substantial, its mechanism is less obvious than Engram or PEER. We hypothesize that mHC serves as a \textit{representational bandwidth multiplier}: by expanding hidden states into multiple streams with doubly-stochastic mixing, mHC increases the effective dimensionality available for sparse modules to write into. This may prevent early dominance from becoming irreversible---if Engram saturates one stream, PEER can still specialize in another. Gradient analysis shows mHC layers maintain significant gradient flow (0.73 mean magnitude), suggesting they actively participate in optimization rather than merely stabilizing it. A full mechanistic analysis is left for future work, but mHC's consistent contribution across all configurations suggests it plays a coordination role beyond simple residual stabilization.
 
 However, our experiments reveal \textbf{functional overlap} between PEER and Engram. Both modules attempt to ``retrieve'' information based on the input---Engram via literal n-gram hashing, PEER via learned query-key matching. When trained jointly, Engram learns faster (simpler mechanism) and captures patterns that PEER would otherwise specialize in.
 

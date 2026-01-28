@@ -9,7 +9,7 @@
 \usepackage{algorithmic}
 \usepackage[margin=1in]{geometry}
 
-\title{Dual-Sparse Architecture: Combining PEER and Engram for\\Efficient Language Model Scaling}
+\title{Triple-Sparse Architecture: Combining PEER, Engram, and mHC for\\Efficient Language Model Scaling}
 
 \author{
   Anonymous Authors
@@ -22,7 +22,7 @@
 \maketitle
 
 \begin{abstract}
-We present a dual-sparse architecture that combines two complementary memory mechanisms for language models: PEER (Parameter Efficient Expert Retrieval) for compute-efficient parameter scaling, and Engram for n-gram pattern memory. Our experiments on TinyLlama (1.1B parameters) demonstrate that PEER enables 7$\times$ parameter scaling (to 7.68B) while maintaining constant throughput (~26K tokens/second), and that training these additional parameters yields a 13.5\% perplexity improvement. Combined with Engram, our hybrid approach achieves 35.4\% perplexity reduction. We provide comprehensive benchmarks showing the decoupling of parameter count from compute cost, validating PEER's core value proposition for efficient model scaling.
+We present a triple-sparse architecture that combines three complementary mechanisms for language models: PEER (Parameter Efficient Expert Retrieval) for compute-efficient parameter scaling, Engram for n-gram pattern memory, and mHC (Manifold-constrained Hyper-Connections) for stable multi-stream residual connections. Our experiments on TinyLlama (1.1B parameters) demonstrate that PEER enables 7$\times$ parameter scaling (to 7.68B) while maintaining constant throughput (~26K tokens/second). Training results show: PEER-262K achieves -10.5\% perplexity, Engram achieves -31.7\%, and mHC achieves -25.7\%. Combined PEER + Engram achieves -33.1\% perplexity reduction. We provide comprehensive benchmarks showing the decoupling of parameter count from compute cost, and detailed analysis of each component's contribution to model quality.
 \end{abstract}
 
 \section{Introduction}
@@ -298,6 +298,315 @@ Guillaume Lample, Alexandre Sablayrolles, Marc'Aurelio Ranzato, Ludovic Denoyer,
 \textit{Large Memory Layers with Product Keys}.
 NeurIPS, 2019.
 
+\bibitem{mhc2024}
+DeepSeek AI.
+\textit{Manifold-Constrained Hyper-Connections for Stable Deep Learning}.
+arXiv:2512.24880, 2024.
+
 \end{thebibliography}
+
+\appendix
+
+\section{mHC: Manifold-Constrained Hyper-Connections}
+\label{app:mhc}
+
+In addition to PEER and Engram, we implement mHC (Manifold-constrained Hyper-Connections) \cite{mhc2024}, which replaces standard residual connections with multi-stream hyper-connections. This creates a \textit{triple-sparse architecture} where each component serves a distinct purpose.
+
+\subsection{mHC Architecture}
+
+mHC expands hidden states into $N$ parallel streams and uses learned mixing matrices projected to doubly-stochastic form via Sinkhorn-Knopp iteration.
+
+For input $\mathbf{x} \in \mathbb{R}^{B \times T \times D}$:
+
+\begin{enumerate}
+    \item \textbf{Stream Expansion}: $\mathbf{x}_{\text{exp}} = W_{\text{expand}} \mathbf{x} \in \mathbb{R}^{B \times T \times N \times D}$
+    \item \textbf{Compute mixing weights} from flattened input:
+    \begin{itemize}
+        \item Pre-mixing: $W_{\text{pre}} = \sigma(\alpha_{\text{pre}} + \tanh(P_{\text{pre}} \mathbf{x}_{\text{flat}}))$
+        \item Post-mixing: $W_{\text{post}} = 2\sigma(\alpha_{\text{post}} + \tanh(P_{\text{post}} \mathbf{x}_{\text{flat}}))$
+        \item Residual mixing: $W_{\text{res}} = \text{Sinkhorn}(\exp(P_{\text{res}} \mathbf{x}_{\text{flat}}))$
+    \end{itemize}
+    \item \textbf{Apply inner function} (attention or MLP): $\mathbf{y} = f(W_{\text{pre}} \mathbf{x}_{\text{exp}})$
+    \item \textbf{Combine}: $\mathbf{o} = W_{\text{res}} \mathbf{x}_{\text{exp}} + W_{\text{post}} \mathbf{y}$
+    \item \textbf{Stream Reduction}: $\mathbf{x}_{\text{out}} = W_{\text{reduce}} \mathbf{o} \in \mathbb{R}^{B \times T \times D}$
+\end{enumerate}
+
+\subsection{Sinkhorn-Knopp Projection}
+
+The residual mixing matrix $W_{\text{res}}$ is projected to doubly-stochastic form (rows and columns sum to 1) via iterative normalization:
+
+\begin{algorithm}
+\caption{Sinkhorn-Knopp Projection}
+\begin{algorithmic}[1]
+\REQUIRE Matrix $A \in \mathbb{R}^{N \times N}$, iterations $K$
+\STATE $A \leftarrow \exp(A)$ \COMMENT{Ensure non-negative}
+\FOR{$k = 1$ to $K$}
+    \STATE $A \leftarrow A / \sum_j A_{ij}$ \COMMENT{Row normalization}
+    \STATE $A \leftarrow A / \sum_i A_{ij}$ \COMMENT{Column normalization}
+\ENDFOR
+\RETURN $A$
+\end{algorithmic}
+\end{algorithm}
+
+Doubly-stochastic matrices preserve signal magnitude, preventing gradient explosion/vanishing in deep networks.
+
+\subsection{mHC Integration Results}
+
+We apply mHC to layers 5, 11, and 17 (spread across the 22-layer model) with $N=4$ streams.
+
+\begin{table}[h]
+\centering
+\caption{mHC Training Results}
+\begin{tabular}{lrrr}
+\toprule
+Model & Perplexity & Change & Parameters \\
+\midrule
+Baseline TinyLlama & 16.54 & — & 1.10B \\
++ mHC (trained) & 12.29 & \textbf{-25.7\%} & 1.21B \\
+\bottomrule
+\end{tabular}
+\label{tab:mhc}
+\end{table}
+
+\textbf{Key finding}: mHC achieves \textbf{25.7\% perplexity improvement}, demonstrating that multi-stream residual connections with manifold constraints significantly enhance model quality.
+
+\subsection{mHC Implementation Details}
+
+Our mHC wrapper applies processing \textit{after} the decoder layer rather than replacing it:
+
+\begin{verbatim}
+class mHCLayer(nn.Module):
+    def forward(self, hidden_states):
+        x_exp = self.expander(hidden_states)
+        x_mhc = self.mhc(x_exp)
+        x_red = self.reducer(x_mhc)
+        mhc_out = self.out_proj(x_red)
+        gate = sigmoid(self.gate_scale)  # ~0.018
+        return hidden_states + gate * mhc_out
+\end{verbatim}
+
+Critical design choices:
+\begin{itemize}
+    \item \textbf{Gated output}: Gate initialized to $\sim$0.018 via \texttt{gate\_scale = -4.0}
+    \item \textbf{Small projection init}: \texttt{std=0.001} for output projection
+    \item \textbf{Post-layer application}: mHC processes layer output, not input
+\end{itemize}
+
+\section{Complete Results Summary}
+\label{app:results}
+
+\begin{table}[h]
+\centering
+\caption{All Training Results on WikiText-2}
+\begin{tabular}{lrrrr}
+\toprule
+Model & Perplexity & Change & Params & Throughput \\
+\midrule
+Baseline TinyLlama & 16.54 & — & 1.10B & 26,991 tok/s \\
+\midrule
+\multicolumn{5}{l}{\textit{Single Components}} \\
++ Engram & 11.30 & -31.7\% & 1.15B & $\sim$26K tok/s \\
++ PEER-262K & 14.81 & -10.5\% & 3.25B & 26,446 tok/s \\
++ mHC & 12.29 & -25.7\% & 1.21B & $\sim$25K tok/s \\
+\midrule
+\multicolumn{5}{l}{\textit{Combinations}} \\
++ Engram + PEER & 11.06 & -33.1\% & 3.30B & $\sim$26K tok/s \\
+\bottomrule
+\end{tabular}
+\label{tab:all_results}
+\end{table}
+
+\section{Training Hyperparameters}
+\label{app:hyperparams}
+
+\begin{table}[h]
+\centering
+\caption{Training Hyperparameters}
+\begin{tabular}{lccc}
+\toprule
+Parameter & Engram & PEER-262K & mHC \\
+\midrule
+Optimizer & AdamW & SGD & AdamW \\
+Learning rate (new params) & $10^{-3}$ & $10^{-2}$ & $10^{-3}$ \\
+Learning rate (backbone) & $10^{-6}$ & $10^{-8}$ & $10^{-6}$ \\
+Momentum & 0.9 (Adam $\beta$) & 0.9 & 0.9 (Adam $\beta$) \\
+Weight decay & 0.01 & 0 & 0.01 \\
+Batch size & 4 & 4 & 4 \\
+Sequence length & 256 & 256 & 256 \\
+Training batches & 1,500 & 3,000 & 1,500 \\
+Gradient clipping & 1.0 & 1.0 & 1.0 \\
+Precision & bfloat16 & bfloat16 & bfloat16 \\
+\bottomrule
+\end{tabular}
+\label{tab:hyperparams}
+\end{table}
+
+\subsection{Why Different Optimizers?}
+
+PEER-262K uses SGD instead of AdamW because:
+\begin{itemize}
+    \item AdamW maintains 2$\times$ parameter memory for optimizer states
+    \item With 262K experts (2.15B additional parameters), this exhausted 15.5GB VRAM
+    \item SGD with momentum requires only 1$\times$ additional memory
+\end{itemize}
+
+\section{Initialization Details}
+\label{app:init}
+
+Proper initialization is critical when augmenting pretrained models. Default PyTorch initialization produces high-variance outputs that corrupt carefully tuned hidden states.
+
+\begin{table}[h]
+\centering
+\caption{Initialization Standard Deviations}
+\begin{tabular}{lcc}
+\toprule
+Component & Weight Type & Std Dev \\
+\midrule
+\multicolumn{3}{l}{\textit{PEER}} \\
+Query projection & Linear & 0.02 \\
+Product keys & Parameter & 0.02 \\
+Expert embeddings & Embedding & 0.01 \\
+\midrule
+\multicolumn{3}{l}{\textit{Engram}} \\
+Value projection & Linear & 0.01 \\
+Key projection & Linear & 0.01 \\
+N-gram embeddings & Embedding & 0.02 \\
+Convolution & Conv1d & 0 (zero init) \\
+\midrule
+\multicolumn{3}{l}{\textit{mHC}} \\
+Stream expander & Linear & 0.02 \\
+Stream reducer & Linear & 0.02 \\
+$\alpha$ parameters & Scalar & 0.01 \\
+Mixing projections & Linear & 0.01 \\
+Output projection & Linear & 0.001 \\
+Gate scale & Scalar & -4.0 (logit) \\
+\bottomrule
+\end{tabular}
+\label{tab:init}
+\end{table}
+
+\subsection{Initialization Ablation}
+
+\begin{table}[h]
+\centering
+\caption{Effect of Initialization on Engram}
+\begin{tabular}{lrr}
+\toprule
+Initialization & Perplexity & Change \\
+\midrule
+Default PyTorch & 450.0 & +2,621\% \\
+Small init (std=0.01-0.02) & 11.30 & -31.7\% \\
+\bottomrule
+\end{tabular}
+\label{tab:init_ablation}
+\end{table}
+
+\section{PEER Module Algorithm}
+\label{app:peer_algorithm}
+
+\begin{algorithm}
+\caption{PEER Forward Pass}
+\begin{algorithmic}[1]
+\REQUIRE Hidden state $\mathbf{h} \in \mathbb{R}^{B \times T \times D}$
+\REQUIRE Keys $K_1, K_2 \in \mathbb{R}^{H \times \sqrt{n} \times d_k}$
+\REQUIRE Expert embeddings $E_{\text{down}}, E_{\text{up}} \in \mathbb{R}^{n \times D}$
+\STATE $\mathbf{q} \leftarrow W_q \mathbf{h}$ \COMMENT{Project to queries}
+\STATE $\mathbf{q}_1, \mathbf{q}_2 \leftarrow \text{split}(\mathbf{q})$ \COMMENT{Split for product keys}
+\FOR{each head $h$}
+    \STATE $s_1 \leftarrow \mathbf{q}_1^h (K_1^h)^T$ \COMMENT{Similarities to key set 1}
+    \STATE $s_2 \leftarrow \mathbf{q}_2^h (K_2^h)^T$ \COMMENT{Similarities to key set 2}
+    \STATE $I_1, v_1 \leftarrow \text{topk}(s_1, k)$ \COMMENT{Top-k indices and scores}
+    \STATE $I_2, v_2 \leftarrow \text{topk}(s_2, k)$
+    \STATE $I_{\text{prod}} \leftarrow I_1 \times \sqrt{n} + I_2$ \COMMENT{Cartesian product}
+    \STATE $v_{\text{prod}} \leftarrow v_1 + v_2$ \COMMENT{Combined scores}
+    \STATE $I_{\text{final}}, v_{\text{final}} \leftarrow \text{topk}(I_{\text{prod}}, v_{\text{prod}}, k)$
+    \STATE $W_{\text{down}} \leftarrow E_{\text{down}}[I_{\text{final}}]$
+    \STATE $W_{\text{up}} \leftarrow E_{\text{up}}[I_{\text{final}}]$
+    \STATE $\mathbf{a} \leftarrow \text{ReLU}(v_{\text{final}})$ \COMMENT{Non-competing scores}
+    \STATE $\mathbf{o}^h \leftarrow \sum_i \mathbf{a}_i \cdot \sigma(W_{\text{down}}^i \mathbf{h}) \cdot W_{\text{up}}^i$
+\ENDFOR
+\RETURN $\sum_h \mathbf{o}^h$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Engram Module Algorithm}
+\label{app:engram_algorithm}
+
+\begin{algorithm}
+\caption{Engram Forward Pass}
+\begin{algorithmic}[1]
+\REQUIRE Hidden state $\mathbf{h} \in \mathbb{R}^{B \times T \times D}$
+\REQUIRE Input token IDs $\mathbf{t} \in \mathbb{Z}^{B \times T}$
+\REQUIRE N-gram embeddings $E_2, E_3 \in \mathbb{R}^{V \times d_e}$
+\STATE \COMMENT{Hash 2-grams}
+\STATE $i_2 \leftarrow (\mathbf{t} \oplus (\mathbf{t}_{\text{shift}} \times m_1)) \mod V$
+\STATE $\mathbf{e}_2 \leftarrow E_2[i_2]$
+\STATE \COMMENT{Hash 3-grams}
+\STATE $i_3 \leftarrow (i_2 \oplus (\mathbf{t}_{\text{shift2}} \times m_2)) \mod V$
+\STATE $\mathbf{e}_3 \leftarrow E_3[i_3]$
+\STATE $\mathbf{e} \leftarrow \text{concat}(\mathbf{e}_2, \mathbf{e}_3)$
+\STATE \COMMENT{Compute gate}
+\STATE $\mathbf{k} \leftarrow W_k \mathbf{e}$
+\STATE $g \leftarrow (\text{RMSNorm}(\mathbf{k}) \cdot \text{RMSNorm}(\mathbf{h})) / \sqrt{D}$
+\STATE $g \leftarrow \sigma(\sqrt{|g|} \cdot \text{sign}(g))$ \COMMENT{Sqrt-sign activation}
+\STATE \COMMENT{Gated output}
+\STATE $\mathbf{v} \leftarrow g \cdot W_v \mathbf{e}$
+\STATE $\mathbf{v} \leftarrow \mathbf{v} + \text{SiLU}(\text{Conv1d}(\mathbf{v}))$
+\RETURN $\mathbf{h} + \mathbf{v}$
+\end{algorithmic}
+\end{algorithm}
+
+\section{Hardware and Reproducibility}
+\label{app:hardware}
+
+\begin{table}[h]
+\centering
+\caption{Hardware Configuration}
+\begin{tabular}{ll}
+\toprule
+Component & Specification \\
+\midrule
+GPU & NVIDIA RTX 5070 Ti \\
+VRAM & 15.5 GB GDDR7 \\
+CUDA Version & 12.x \\
+PyTorch Version & 2.x \\
+Transformers & 4.x \\
+\bottomrule
+\end{tabular}
+\label{tab:hardware}
+\end{table}
+
+\subsection{Reproducibility Checklist}
+
+\begin{itemize}
+    \item[$\checkmark$] Random seeds set for reproducibility
+    \item[$\checkmark$] All hyperparameters documented
+    \item[$\checkmark$] Training/evaluation code publicly available
+    \item[$\checkmark$] Pretrained weights available for download
+    \item[$\checkmark$] Dataset (WikiText-2) publicly available
+\end{itemize}
+
+\section{Limitations and Future Work}
+\label{app:limitations}
+
+\subsection{Current Limitations}
+
+\begin{enumerate}
+    \item \textbf{Single evaluation dataset}: WikiText-2 is n-gram heavy, which may favor Engram
+    \item \textbf{Small base model}: TinyLlama (1.1B) may not represent larger model behavior
+    \item \textbf{No downstream task evaluation}: Only perplexity measured, not task performance
+    \item \textbf{Triple-sparse combination untested}: PEER + Engram + mHC not yet evaluated together
+    \item \textbf{Limited training budget}: Longer training may yield further improvements
+\end{enumerate}
+
+\subsection{Future Directions}
+
+\begin{enumerate}
+    \item \textbf{Triple-sparse evaluation}: Combine all three components
+    \item \textbf{Downstream tasks}: Evaluate on MMLU, HellaSwag, ARC, etc.
+    \item \textbf{Larger base models}: Test on 7B+ parameter models
+    \item \textbf{Expert scaling}: Push to 1M+ experts with memory optimization
+    \item \textbf{Continuous pretraining}: Train on larger corpora (RedPajama, etc.)
+\end{enumerate}
 
 \end{document}

@@ -43,16 +43,22 @@ python benchmark_efficiency.py --expert-counts 16384 65536 262144 802816
 
 | Model | Perplexity | Change | Notes |
 |-------|-----------|--------|-------|
-| Base TinyLlama | 17.12 | — | Baseline |
-| + Engram (trained) | 11.30 | **-34.0%** | Pattern memory |
-| + PEER-262K (trained) | 14.81 | **-13.5%** | 3x params, same throughput |
-| + Both (Hybrid) | 11.06 | **-35.4%** | Best of both |
+| Base TinyLlama | 16.54 | — | Baseline |
+| + Engram (trained) | 11.30 | **-31.7%** | Pattern memory |
+| + PEER-262K (trained) | 14.81 | **-10.5%** | 3x params, same throughput |
+| + mHC (trained) | 12.29 | **-25.7%** | Multi-stream residuals |
+| + Engram + PEER (Hybrid) | 11.06 | **-33.1%** | Best combination |
 
-**Key finding**: Trained PEER-262K achieves **14.81 perplexity** (-13.5%), proving that the additional expert capacity improves quality, not just efficiency.
+**Key findings**:
+- **mHC achieves 12.29 perplexity** (-25.7%), demonstrating that multi-stream residual connections significantly improve quality
+- **Engram** remains the strongest single addition for perplexity improvement
+- **PEER** provides parameter scaling with constant throughput
 
-Train PEER-262K yourself:
+Train each component:
 ```bash
-python train_peer_large.py --train --batches 3000 --lr 0.01
+python train_and_eval.py          # Engram/PEER/Hybrid
+python train_peer_large.py --train --batches 3000 --lr 0.01  # PEER-262K
+python train_mhc.py --train --batches 1500  # mHC
 ```
 
 ## Key Insight: Initialization Matters
@@ -83,10 +89,11 @@ Without this fix, Engram produced PPL of 450 (+2626% worse). With it: PPL 11.30 
 - 100K vocab size per n-gram order
 - Gated addition to hidden states in early layers
 
-### mHC (All layers - experimental)
-- Expands hidden state into N parallel streams
+### mHC (Layers 5, 11, 17)
+- Expands hidden state into 4 parallel streams
 - Uses Sinkhorn-Knopp projection for doubly-stochastic mixing matrices
-- Stabilizes gradient flow for deeper/wider models
+- Gated output projection (small init for stability)
+- **Result: 12.29 perplexity (-25.7%)**
 - Based on [DeepSeek's mHC paper](https://arxiv.org/abs/2512.24880)
 
 ### Why This Combination Works
@@ -117,6 +124,8 @@ Shows which n-gram patterns the model learned to prioritize. Generates gate acti
 - `llama_mhc.py` - mHC (Manifold-constrained Hyper-Connections) module
 - `train_and_eval.py` - Training and evaluation script (Engram/PEER/Hybrid)
 - `train_peer_large.py` - Train large PEER configurations (262K+ experts)
+- `train_mhc.py` - Train mHC and evaluate perplexity
+- `test_mhc.py` - Unit tests for mHC module
 - `benchmark_efficiency.py` - VRAM/throughput/perplexity benchmark
 - `visualize_engram.py` - N-gram activation visualization
 

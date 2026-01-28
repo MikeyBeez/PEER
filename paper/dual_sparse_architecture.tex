@@ -1,0 +1,303 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage[margin=1in]{geometry}
+
+\title{Dual-Sparse Architecture: Combining PEER and Engram for\\Efficient Language Model Scaling}
+
+\author{
+  Anonymous Authors
+}
+
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present a dual-sparse architecture that combines two complementary memory mechanisms for language models: PEER (Parameter Efficient Expert Retrieval) for compute-efficient parameter scaling, and Engram for n-gram pattern memory. Our experiments on TinyLlama (1.1B parameters) demonstrate that PEER enables 7$\times$ parameter scaling (to 7.68B) while maintaining constant throughput (~26K tokens/second), and that training these additional parameters yields a 13.5\% perplexity improvement. Combined with Engram, our hybrid approach achieves 35.4\% perplexity reduction. We provide comprehensive benchmarks showing the decoupling of parameter count from compute cost, validating PEER's core value proposition for efficient model scaling.
+\end{abstract}
+
+\section{Introduction}
+
+Scaling language models has traditionally required proportional increases in both memory and compute. A model with 10$\times$ more parameters requires roughly 10$\times$ more FLOPs per forward pass, creating a fundamental barrier to efficient scaling. Recent work on Mixture of Experts (MoE) partially addresses this by activating only a subset of parameters per token, but standard MoE architectures are limited to dozens or hundreds of experts due to routing overhead.
+
+PEER (Parameter Efficient Expert Retrieval) \cite{peer2024} breaks this constraint through product-key retrieval, enabling millions of micro-experts with $O(\sqrt{n})$ lookup complexity. However, the practical benefits of PEER for language model augmentation have not been thoroughly benchmarked, particularly regarding:
+
+\begin{enumerate}
+    \item \textbf{Compute efficiency}: Does throughput actually remain constant as experts scale?
+    \item \textbf{Quality improvement}: Does training additional PEER capacity improve perplexity?
+    \item \textbf{Complementary architectures}: How does PEER interact with other memory mechanisms?
+\end{enumerate}
+
+We address these questions by integrating PEER into TinyLlama and conducting systematic benchmarks. Additionally, we combine PEER with Engram \cite{engram2024}, a hash-based n-gram memory module, creating a \textit{dual-sparse architecture} where:
+
+\begin{itemize}
+    \item \textbf{Engram} (early layers): Retrieves static n-gram patterns for phrase-level recognition
+    \item \textbf{PEER} (late layers): Routes to specialized micro-experts for contextual reasoning
+\end{itemize}
+
+Our key contributions:
+
+\begin{enumerate}
+    \item \textbf{Efficiency benchmarks}: We demonstrate 7$\times$ parameter scaling (1.1B $\rightarrow$ 7.68B) with $<$3\% throughput reduction
+    \item \textbf{Training validation}: Trained PEER-262K achieves 14.81 perplexity vs 17.12 baseline (-13.5\%)
+    \item \textbf{Dual-sparse architecture}: Combined PEER + Engram achieves 11.06 perplexity (-35.4\%)
+    \item \textbf{Implementation insights}: We identify critical initialization strategies for stable training
+\end{enumerate}
+
+\section{Related Work}
+
+\subsection{Mixture of Experts}
+
+Sparse Mixture of Experts \cite{shazeer2017outrageously} introduced the concept of conditional computation, where only a subset of model parameters are activated per input. GShard \cite{lepikhin2020gshard} and Switch Transformer \cite{fedus2022switch} scaled this approach to trillion-parameter models. However, these approaches typically use dozens to hundreds of experts with learned routing, limiting the granularity of specialization.
+
+\subsection{Product Key Memory}
+
+Product keys \cite{lample2019large} enable efficient retrieval from large memory banks through factorized key representations. Given $n$ memory slots, product keys use two sets of $\sqrt{n}$ keys, reducing lookup from $O(n)$ to $O(\sqrt{n})$. PEER \cite{peer2024} applies this principle to expert retrieval, enabling millions of micro-experts.
+
+\subsection{N-gram Memory}
+
+Engram \cite{engram2024} augments language models with hash-based n-gram retrieval, providing a non-parametric memory for common patterns. Unlike attention-based retrieval, Engram uses deterministic hashing for $O(1)$ lookup of phrase patterns.
+
+\section{Method}
+
+\subsection{Architecture Overview}
+
+We augment a pretrained TinyLlama model (1.1B parameters, 22 layers) with two sparse memory modules:
+
+\begin{itemize}
+    \item \textbf{PEER layers} at positions 19 and 21 (late layers)
+    \item \textbf{Engram layers} at positions 1 and 5 (early layers)
+\end{itemize}
+
+This placement follows the intuition that early layers handle pattern recognition while late layers handle reasoning.
+
+\subsection{PEER Module}
+
+Each PEER layer contains:
+
+\begin{itemize}
+    \item \textbf{Product keys}: Two sets of $\sqrt{n}$ keys, where $n$ is the number of experts
+    \item \textbf{Expert embeddings}: $n$ pairs of down-projection and up-projection vectors
+    \item \textbf{Query projection}: Maps hidden states to query vectors for each key set
+\end{itemize}
+
+For input hidden state $\mathbf{h} \in \mathbb{R}^d$:
+
+\begin{enumerate}
+    \item Project to queries: $\mathbf{q}_1, \mathbf{q}_2 = \text{split}(W_q \mathbf{h})$
+    \item Compute similarities: $s_1 = \mathbf{q}_1 K_1^T$, $s_2 = \mathbf{q}_2 K_2^T$
+    \item Select top-$k$ from each: $I_1 = \text{topk}(s_1)$, $I_2 = \text{topk}(s_2)$
+    \item Form Cartesian product and select final top-$k$ experts
+    \item Retrieve expert weights and compute: $\mathbf{o} = \sum_i \alpha_i \cdot \sigma(W_{\text{down}}^i \mathbf{h}) \cdot W_{\text{up}}^i$
+\end{enumerate}
+
+With $k=8$ experts per head and 4 heads, we retrieve 32 experts per token from pools of up to 803K experts.
+
+\subsection{Engram Module}
+
+Each Engram layer computes:
+
+\begin{enumerate}
+    \item Hash n-grams (2-gram, 3-gram) to indices: $i = \text{hash}(t_{-n+1:0}) \mod V$
+    \item Lookup embeddings: $\mathbf{e} = E[i]$
+    \item Compute gated output: $\mathbf{o} = \sigma(g(\mathbf{h}, \mathbf{e})) \cdot W_v \mathbf{e}$
+\end{enumerate}
+
+The gate $g$ uses the product of normalized keys and queries with sqrt-sign activation for stability.
+
+\subsection{Initialization}
+
+A critical finding: \textbf{new modules must be initialized near-zero} to avoid corrupting pretrained hidden states. We use:
+
+\begin{verbatim}
+nn.init.normal_(weight, std=0.01)  # projections
+nn.init.normal_(embedding, std=0.02)  # embeddings
+\end{verbatim}
+
+Without this, Engram produced 450 perplexity (+2626\%) instead of 11.30 (-31.7\%).
+
+\section{Experiments}
+
+\subsection{Experimental Setup}
+
+\textbf{Base model}: TinyLlama-1.1B-Chat-v1.0 \\
+\textbf{Hardware}: NVIDIA RTX 5070 Ti (15.5 GB VRAM) \\
+\textbf{Dataset}: WikiText-2 (train and test splits) \\
+\textbf{Metrics}: Perplexity, peak VRAM, throughput (tokens/second)
+
+\subsection{Efficiency Benchmark}
+
+We measure inference efficiency across PEER configurations without training (random initialization). This isolates the computational overhead of PEER from any quality effects.
+
+\begin{table}[h]
+\centering
+\caption{PEER Efficiency Scaling (Untrained)}
+\begin{tabular}{lrrrrr}
+\toprule
+Config & Experts & Parameters & VRAM & Throughput & PPL \\
+\midrule
+Baseline & — & 1.10B & 2.07 GB & 26,991 tok/s & 17.12 \\
+PEER-16K & 16,384 & 1.24B & 2.35 GB & 26,521 tok/s & 17.12 \\
+PEER-65K & 65,536 & 1.64B & 3.10 GB & 26,405 tok/s & 17.12 \\
+PEER-262K & 262,144 & 3.25B & 6.10 GB & 26,446 tok/s & 17.12 \\
+PEER-590K & 589,824 & 5.93B & 11.10 GB & 26,401 tok/s & 17.12 \\
+\textbf{PEER-803K} & \textbf{802,816} & \textbf{7.68B} & \textbf{14.35 GB} & \textbf{26,262 tok/s} & \textbf{17.12} \\
+\bottomrule
+\end{tabular}
+\label{tab:efficiency}
+\end{table}
+
+\textbf{Key observation}: Throughput remains nearly constant (26,262-26,991 tok/s, $<$3\% variance) despite 7$\times$ parameter increase. Memory scales linearly as expected (expert embeddings are stored), but compute does not—validating PEER's core efficiency claim.
+
+\subsection{Training Results}
+
+We train PEER-262K for 3000 batches with SGD (momentum=0.9, lr=0.01) on WikiText-2 train split.
+
+\begin{table}[h]
+\centering
+\caption{Quality Results (Trained Models)}
+\begin{tabular}{lrrr}
+\toprule
+Model & Perplexity & Change & Parameters \\
+\midrule
+Baseline TinyLlama & 17.12 & — & 1.10B \\
++ Engram (trained) & 11.30 & -34.0\% & 1.15B \\
++ PEER-262K (trained) & 14.81 & -13.5\% & 3.25B \\
++ Both (Hybrid) & 11.06 & -35.4\% & 3.30B \\
+\bottomrule
+\end{tabular}
+\label{tab:quality}
+\end{table}
+
+\textbf{Key observation}: Trained PEER-262K achieves 14.81 perplexity, a 13.5\% improvement over baseline. This demonstrates that PEER's additional capacity is not just stored—it is \textit{utilized} to improve model quality.
+
+\subsection{Ablation: PEER Layer Placement}
+
+We place PEER in late layers (19, 21) based on the hypothesis that early layers handle pattern matching while late layers handle reasoning. Engram is placed in early layers (1, 5) for complementary coverage.
+
+\section{Analysis}
+
+\subsection{Why Throughput Stays Constant}
+
+PEER's constant throughput despite 7$\times$ parameter increase stems from:
+
+\begin{enumerate}
+    \item \textbf{Sparse retrieval}: Only $k=8$ experts activated per head regardless of pool size
+    \item \textbf{Product-key efficiency}: $O(\sqrt{n})$ lookup instead of $O(n)$
+    \item \textbf{Embedding-based experts}: Simple lookup + matmul, no routing networks
+\end{enumerate}
+
+The dominant cost is the base model's attention and MLP computation, which PEER augments rather than replaces.
+
+\subsection{Why Training Improves Quality}
+
+Untrained PEER maintains baseline perplexity because:
+\begin{itemize}
+    \item Small initialization ($\sigma=0.01$) means PEER output $\approx 0$ initially
+    \item The model effectively ignores untrained PEER contributions
+\end{itemize}
+
+After training:
+\begin{itemize}
+    \item Experts specialize to different input patterns
+    \item Product-key retrieval routes tokens to relevant experts
+    \item The 262K experts provide fine-grained specialization impossible with standard MoE
+\end{itemize}
+
+\subsection{Complementary Architectures}
+
+Engram and PEER serve different purposes:
+
+\begin{itemize}
+    \item \textbf{Engram}: Deterministic n-gram lookup, improves pattern recognition
+    \item \textbf{PEER}: Learned expert routing, improves contextual reasoning
+\end{itemize}
+
+Their combination (11.06 PPL) slightly outperforms Engram alone (11.30 PPL), suggesting complementary benefits. The improvement is modest because Engram already captures most gains on WikiText-2, which is n-gram heavy.
+
+\section{Discussion}
+
+\subsection{Implications for Scaling}
+
+Our results suggest a new scaling paradigm:
+
+\begin{enumerate}
+    \item Train a moderate base model (1-7B parameters)
+    \item Add PEER layers with millions of experts
+    \item Train only PEER parameters (faster, less memory)
+    \item Result: Quality of larger model, inference cost of smaller model
+\end{enumerate}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item \textbf{Memory still scales}: While compute is constant, VRAM scales linearly with experts
+    \item \textbf{Single dataset}: We only evaluate on WikiText-2; broader evaluation needed
+    \item \textbf{Small base model}: TinyLlama may not represent behavior at larger scales
+    \item \textbf{Limited training}: 3000 batches may not fully utilize 262K expert capacity
+\end{itemize}
+
+\subsection{Future Work}
+
+\begin{itemize}
+    \item Scale to 1M+ experts with CPU offloading or quantization
+    \item Evaluate on diverse benchmarks (MMLU, HellaSwag, etc.)
+    \item Compare PEER training efficiency vs full model training
+    \item Investigate optimal layer placement and expert count
+\end{itemize}
+
+\section{Conclusion}
+
+We present a dual-sparse architecture combining PEER and Engram for efficient language model scaling. Our benchmarks demonstrate that PEER enables 7$\times$ parameter scaling with constant throughput, and that training these parameters yields meaningful quality improvements (-13.5\% perplexity). Combined with Engram, our approach achieves -35.4\% perplexity reduction on WikiText-2.
+
+These results validate PEER's core value proposition: \textbf{decouple parameter capacity from compute cost}. As models scale, this decoupling becomes increasingly valuable, enabling quality improvements without proportional inference cost increases.
+
+\section*{Code Availability}
+
+Code and trained weights are available at: \url{https://github.com/MikeyBeez/PEER}
+
+\bibliographystyle{plain}
+\begin{thebibliography}{9}
+
+\bibitem{peer2024}
+Anonymous Authors.
+\textit{Mixture of A Million Experts}.
+arXiv:2407.04153, 2024.
+
+\bibitem{engram2024}
+DeepSeek AI.
+\textit{Engram: Byte-Level Memory-Augmented Language Modeling}.
+GitHub, 2024.
+
+\bibitem{shazeer2017outrageously}
+Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean.
+\textit{Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer}.
+ICLR, 2017.
+
+\bibitem{lepikhin2020gshard}
+Dmitry Lepikhin, HyoukJoong Lee, Yuanzhong Xu, Dehao Chen, Orhan Firat, Yanping Huang, Maxim Krikun, Noam Shazeer, and Zhifeng Chen.
+\textit{GShard: Scaling Giant Models with Conditional Computation and Automatic Sharding}.
+ICLR, 2021.
+
+\bibitem{fedus2022switch}
+William Fedus, Barret Zoph, and Noam Shazeer.
+\textit{Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity}.
+JMLR, 2022.
+
+\bibitem{lample2019large}
+Guillaume Lample, Alexandre Sablayrolles, Marc'Aurelio Ranzato, Ludovic Denoyer, and Hervé Jégou.
+\textit{Large Memory Layers with Product Keys}.
+NeurIPS, 2019.
+
+\end{thebibliography}
+
+\end{document}

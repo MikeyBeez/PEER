@@ -44,26 +44,47 @@ python benchmark_efficiency.py --expert-counts 16384 65536 262144 802816
 | Model | Perplexity | Change | Notes |
 |-------|-----------|--------|-------|
 | Base TinyLlama | 16.54 | — | Baseline |
-| + Engram (trained) | 11.30 | **-31.7%** | Pattern memory |
-| + PEER-262K (trained) | 14.81 | **-10.5%** | 3x params, same throughput |
-| + mHC (trained) | 12.29 | **-25.7%** | Multi-stream residuals |
-| + Engram + PEER (Hybrid) | 11.06 | **-33.1%** | Best dual combination |
-| + Triple-Sparse (all three) | 13.79 | **-16.6%** | PEER + Engram + mHC |
+| + Engram (trained) | 11.30 | -31.7% | Pattern memory |
+| + PEER-262K (trained) | 14.81 | -10.5% | 3x params, same throughput |
+| + mHC (trained) | 12.29 | -25.7% | Multi-stream residuals |
+| + Engram + PEER (Hybrid) | 11.06 | -33.1% | Dual combination |
+| + Triple-Sparse (joint) | 13.79 | -16.6% | Redundancy bottleneck |
+| **+ Triple-Sparse (differential LR)** | **11.05** | **-33.2%** | **Best overall** |
 
 **Key findings**:
+- **Differential LR training** (-33.2%) achieves the best results by breaking the redundancy bottleneck
 - **Engram** (-31.7%) is the strongest single component for perplexity improvement
 - **mHC** (-25.7%) provides significant gains via multi-stream residual connections
 - **PEER** (-10.5%) provides parameter scaling with constant throughput
-- **Engram + PEER** (-33.1%) is the best dual combination
-- **Triple-Sparse** (-16.6%) underperforms individual components, suggesting partial redundancy
+- **Joint Triple-Sparse** (-16.6%) underperforms due to Sparsity Overlap between PEER and Engram
+
+### Differential Learning Rate Training
+
+Joint training of PEER + Engram + mHC hits a "Redundancy Bottleneck" where both PEER and Engram compete for the same information signal. The solution: **differential learning rates** across training phases:
+
+1. **Phase 1** (Engram-Lead): Engram LR=1e-3, PEER LR=1e-5 → Engram learns common patterns first
+2. **Phase 2** (PEER-Catchup): PEER LR=1e-3, Engram LR=1e-5 → PEER learns what Engram can't handle
+3. **Phase 3** (Coordinate): Both LR=5e-4 → Fine-tune together
+
+This achieves **11.05 PPL** - better than any individual component or naive joint training.
 
 Train each component:
 ```bash
 python train_and_eval.py          # Engram/PEER/Hybrid
 python train_peer_large.py --train --batches 3000 --lr 0.01  # PEER-262K
 python train_mhc.py --train --batches 1500  # mHC
-python train_triple.py --train --batches 3000  # All three together
+python train_triple.py --train --batches 3000  # Joint Triple-Sparse
+python train_differential.py --train  # Differential LR (best)
 ```
+
+### Conflict Analysis
+
+To diagnose redundancy between PEER and Engram:
+```bash
+python analyze_token_conflict.py --samples 100
+```
+
+This tracks output magnitudes and identifies which tokens trigger both modules.
 
 ## Key Insight: Initialization Matters
 
@@ -129,6 +150,9 @@ Shows which n-gram patterns the model learned to prioritize. Generates gate acti
 - `train_and_eval.py` - Training and evaluation script (Engram/PEER/Hybrid)
 - `train_peer_large.py` - Train large PEER configurations (262K+ experts)
 - `train_mhc.py` - Train mHC and evaluate perplexity
+- `train_triple.py` - Joint Triple-Sparse training (PEER + Engram + mHC)
+- `train_differential.py` - **Best results**: Differential LR training for Triple-Sparse
+- `analyze_token_conflict.py` - Diagnose PEER/Engram redundancy via activation tracking
 - `test_mhc.py` - Unit tests for mHC module
 - `benchmark_efficiency.py` - VRAM/throughput/perplexity benchmark
 - `visualize_engram.py` - N-gram activation visualization

@@ -9,26 +9,35 @@ Together they form a **Dual-Sparse Architecture**: PEER handles dynamic reasonin
 
 ## Understanding PEER's Value Proposition
 
-**PEER is fundamentally about memory efficiency, not perplexity improvement.**
+**PEER is fundamentally about compute efficiency, not perplexity improvement.**
 
-Traditional scaling requires linear increases in VRAM as you add parameters. PEER breaks this constraint:
+Traditional scaling requires linear increases in both memory AND compute as you add parameters. PEER decouples these:
 
-- **Massive capacity, minimal footprint** - Store millions of micro-experts, activate only a handful per token
+- **Massive capacity** - Store millions of micro-experts as embeddings
+- **Constant compute** - Only k experts activated per token, regardless of total count
 - **O(√n) retrieval** - Product-key lookup scales sub-linearly with expert count
-- **Decoupled capacity from compute** - Scale parameters without scaling FLOPs or VRAM
 
-The right way to evaluate PEER:
+The key insight: **throughput stays constant as you scale parameters.**
 
-| Metric | What it measures |
-|--------|------------------|
-| VRAM usage | Memory footprint at inference |
-| Perplexity per GB | Efficiency of memory utilization |
-| Throughput | Tokens/second at equivalent quality |
-| Scaling behavior | How metrics change as experts increase |
+## Efficiency Benchmark
 
-Comparing raw perplexity against dense models misses the point—PEER lets you have 10x the parameters at 2x the memory.
+Benchmarked on RTX 5070 Ti (15.5 GB VRAM):
 
-## Results
+| Config | Parameters | VRAM | Perplexity | Throughput |
+|--------|-----------|------|------------|------------|
+| Baseline | 1.1B | 2.07 GB | 17.12 | 26,991 tok/s |
+| PEER-16K | 1.24B (+12%) | 2.35 GB | 17.12 | 26,521 tok/s |
+| PEER-65K | 1.64B (+49%) | 3.10 GB | 17.12 | 26,405 tok/s |
+| PEER-262K | 3.25B (+195%) | 6.10 GB | 17.12 | 26,446 tok/s |
+
+**Key finding**: With PEER-262K we have **3x the parameters** but **throughput stays constant** (~26K tok/s). Compute doesn't scale with expert count—that's the efficiency win.
+
+Run the benchmark yourself:
+```bash
+python benchmark_efficiency.py --expert-counts 16384 65536 262144
+```
+
+## Quality Results (with Training)
 
 | Model | Perplexity | Notes |
 |-------|-----------|-------|
@@ -37,7 +46,7 @@ Comparing raw perplexity against dense models misses the point—PEER lets you h
 | + PEER | 16.54 | Maintains quality with sparse retrieval |
 | + Both (Hybrid) | 11.06 | **-33.10%** - best of both |
 
-PEER maintains baseline perplexity while enabling massive parameter scaling—that's the win.
+PEER maintains baseline perplexity while enabling massive parameter scaling. Engram improves quality.
 
 ## Key Insight: Initialization Matters
 
@@ -93,6 +102,7 @@ Shows which n-gram patterns the model learned to prioritize. Generates gate acti
 
 - `llama_peer_engram.py` - Core integration: PEER and Engram modules for LLaMA
 - `train_and_eval.py` - Training and evaluation script
+- `benchmark_efficiency.py` - VRAM/throughput/perplexity benchmark
 - `visualize_engram.py` - N-gram activation visualization
 
 ## Requirements

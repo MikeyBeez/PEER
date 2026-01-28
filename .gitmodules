@@ -1,0 +1,6 @@
+[submodule "Engram"]
+	path = Engram
+	url = https://github.com/deepseek-ai/Engram.git
+[submodule "PEER-pytorch"]
+	path = PEER-pytorch
+	url = https://github.com/lucidrains/PEER-pytorch.git

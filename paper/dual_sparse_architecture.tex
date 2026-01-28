@@ -22,7 +22,7 @@
 \maketitle
 
 \begin{abstract}
-\textbf{Sparse retrieval modules are not additive---they compete for representational real estate.} We demonstrate this through a triple-sparse architecture combining PEER (Parameter Efficient Expert Retrieval), Engram (n-gram pattern memory), and mHC (manifold-constrained hyper-connections). While each module improves perplexity individually (Engram: -31.7\%, mHC: -25.7\%, PEER: -10.5\%), joint training produces a ``Redundancy Bottleneck'' where the combined model (-16.6\%) underperforms its components. Analysis reveals the cause: Engram dominates gradient flow (2.62:1 magnitude ratio), crowding out PEER's specialization. We introduce \textbf{differential learning rate training}---a coordination principle where modules take turns leading optimization while others follow at minimal learning rates. This achieves \textbf{-33.2\% perplexity}, the best result across all configurations. Our findings generalize beyond this specific architecture: any system combining multiple sparse retrieval mechanisms must coordinate their training to prevent functional overlap. We also validate PEER's efficiency claims, demonstrating 7$\times$ parameter scaling (1.1B $\rightarrow$ 7.68B) with $<$3\% throughput reduction.
+\textbf{Sparse retrieval modules are not additive---they compete for representational real estate} (i.e., gradient signal and explanatory responsibility under a shared loss). We demonstrate this through a triple-sparse architecture combining PEER (Parameter Efficient Expert Retrieval), Engram (n-gram pattern memory), and mHC (manifold-constrained hyper-connections). While each module improves perplexity individually (Engram: -31.7\%, mHC: -25.7\%, PEER: -10.5\%), joint training produces a ``Redundancy Bottleneck'' where the combined model (-16.6\%) underperforms its components. Analysis reveals the cause: Engram dominates gradient flow (2.62:1 magnitude ratio), crowding out PEER's specialization. We introduce \textbf{differential learning rate training}---a coordination principle where modules take turns leading optimization while others follow at minimal learning rates. This achieves \textbf{-33.2\% perplexity}, the best result across all configurations. Our findings generalize beyond this specific architecture: any system combining multiple sparse retrieval mechanisms must coordinate their training to prevent functional overlap. We also validate PEER's efficiency claims, demonstrating 7$\times$ parameter scaling (1.1B $\rightarrow$ 7.68B) with $<$3\% throughput reduction.
 \end{abstract}
 
 \section{Introduction}
@@ -38,7 +38,9 @@ We combine three sparse mechanisms into a ``triple-sparse architecture'':
 
 Each module individually improves perplexity substantially. But when trained jointly, performance \textit{degrades}---the combined model (-16.6\%) underperforms Engram alone (-31.7\%). We call this the \textbf{Redundancy Bottleneck}.
 
-The root cause is \textbf{functional overlap}: both PEER and Engram attempt to ``retrieve'' information based on input patterns. During joint training, the faster-learning module (Engram) captures patterns that the slower module (PEER) would otherwise specialize in. Output magnitude analysis confirms this: Engram dominates at a 2.62:1 ratio, effectively crowding out PEER's contribution.
+The root cause is \textbf{functional overlap}---when two modules can independently explain the same variance in the training objective. The deeper mechanism is \textbf{learning-speed asymmetry}: when multiple modules can reduce the same loss term, the module with the shortest effective path from input to loss dominates early optimization. This collapses the error signal, starving slower or higher-capacity modules before they can specialize.
+
+In our case, Engram's path (hash $\rightarrow$ embedding $\rightarrow$ output) is simpler than PEER's (query projection $\rightarrow$ product-key search $\rightarrow$ expert retrieval $\rightarrow$ output). Engram learns faster and captures patterns that PEER would otherwise specialize in. Output magnitude analysis confirms this: Engram dominates at a 2.62:1 ratio, effectively crowding out PEER's contribution.
 
 The solution is not architectural---it's a \textbf{training coordination principle}. We introduce \textit{differential learning rate training}, where modules take turns leading optimization:
 \begin{enumerate}
@@ -46,6 +48,8 @@ The solution is not architectural---it's a \textbf{training coordination princip
     \item \textbf{Phase 2}: PEER leads, Engram follows
     \item \textbf{Phase 3}: Both coordinate at medium LR
 \end{enumerate}
+
+Critically, these phases are \textit{soft biases in learning speed}, not strict stages---all modules remain plastic throughout training. The ``following'' module still adapts at $10^{-5}$ LR, maintaining compatibility with the leader's evolving representations.
 
 This achieves -33.2\% perplexity---better than any individual module or naive joint training.
 
@@ -244,9 +248,9 @@ Staggered (freeze) & 99.77 & +503\% & Distribution shift \\
 
 \textbf{Key insight}: Never fully freeze modules. Maintaining a minimal learning rate ($10^{-5}$) allows modules to adapt to each other while one ``leads'' and the other ``follows.''
 
-\subsection{The Redundancy Bottleneck in Abstract Terms}
+\subsection{The Redundancy Bottleneck as Learning-Speed Asymmetry}
 
-The Redundancy Bottleneck is a special case of a more general phenomenon: \textbf{when multiple modules compete to explain the same signal under a shared loss, the fastest learner wins}. The slower module's gradients diminish as the loss decreases, starving it of learning signal before it can specialize.
+The Redundancy Bottleneck is a special case of \textbf{learning-speed asymmetry}: when multiple modules can reduce the same loss term, the module with the shortest effective path from input to loss dominates early optimization. As loss decreases, gradients to slower modules diminish, starving them of learning signal before they can specialize.
 
 This connects to several known failure modes in deep learning:
 \begin{itemize}
@@ -298,7 +302,7 @@ Engram and PEER were designed for different purposes:
 
 \textbf{Why mHC matters}: While mHC's -25.7\% improvement is substantial, its mechanism is less obvious than Engram or PEER. We hypothesize that mHC serves as a \textit{representational bandwidth multiplier}: by expanding hidden states into multiple streams with doubly-stochastic mixing, mHC increases the effective dimensionality available for sparse modules to write into. This may prevent early dominance from becoming irreversible---if Engram saturates one stream, PEER can still specialize in another. Gradient analysis shows mHC layers maintain significant gradient flow (0.73 mean magnitude), suggesting they actively participate in optimization rather than merely stabilizing it. A full mechanistic analysis is left for future work, but mHC's consistent contribution across all configurations suggests it plays a coordination role beyond simple residual stabilization.
 
-However, our experiments reveal \textbf{functional overlap} between PEER and Engram. Both modules attempt to ``retrieve'' information based on the input---Engram via literal n-gram hashing, PEER via learned query-key matching. When trained jointly, Engram learns faster (simpler mechanism) and captures patterns that PEER would otherwise specialize in.
+However, our experiments reveal \textbf{functional overlap} between PEER and Engram---both modules can independently explain the same variance in the training objective. Both attempt to ``retrieve'' information based on the input: Engram via literal n-gram hashing, PEER via learned query-key matching. Due to learning-speed asymmetry (Engram's simpler computation path), Engram dominates early optimization and captures patterns that PEER would otherwise specialize in.
 
 \textbf{Evidence of overlap}: Output magnitude analysis shows Engram contributing 2.62$\times$ more than PEER in joint training. Differential LR training forces PEER to specialize in patterns Engram \textit{cannot} capture (context-dependent, non-literal patterns), achieving 11.05 PPL---better than either alone.
 

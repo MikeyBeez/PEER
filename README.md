@@ -29,12 +29,13 @@ Benchmarked on RTX 5070 Ti (15.5 GB VRAM):
 | PEER-16K | 1.24B (+12%) | 2.35 GB | 17.12 | 26,521 tok/s |
 | PEER-65K | 1.64B (+49%) | 3.10 GB | 17.12 | 26,405 tok/s |
 | PEER-262K | 3.25B (+195%) | 6.10 GB | 17.12 | 26,446 tok/s |
+| **PEER-803K** | **7.68B (+598%)** | 14.35 GB | 17.12 | 26,262 tok/s |
 
-**Key finding**: With PEER-262K we have **3x the parameters** but **throughput stays constant** (~26K tok/s). Compute doesn't scale with expert count—that's the efficiency win.
+**Key finding**: With PEER-803K we have **7x the parameters** but **throughput stays constant** (~26K tok/s). Compute doesn't scale with expert count—that's the efficiency win.
 
 Run the benchmark yourself:
 ```bash
-python benchmark_efficiency.py --expert-counts 16384 65536 262144
+python benchmark_efficiency.py --expert-counts 16384 65536 262144 802816
 ```
 
 ## Quality Results (with Training)

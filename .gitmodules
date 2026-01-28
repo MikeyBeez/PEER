@@ -4,3 +4,6 @@
 [submodule "PEER-pytorch"]
 	path = PEER-pytorch
 	url = https://github.com/lucidrains/PEER-pytorch.git
+[submodule "mHC-reference"]
+	path = mHC-reference
+	url = https://github.com/VatsaDev/mHC.git

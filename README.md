@@ -47,18 +47,22 @@ python benchmark_efficiency.py --expert-counts 16384 65536 262144 802816
 | + Engram (trained) | 11.30 | **-31.7%** | Pattern memory |
 | + PEER-262K (trained) | 14.81 | **-10.5%** | 3x params, same throughput |
 | + mHC (trained) | 12.29 | **-25.7%** | Multi-stream residuals |
-| + Engram + PEER (Hybrid) | 11.06 | **-33.1%** | Best combination |
+| + Engram + PEER (Hybrid) | 11.06 | **-33.1%** | Best dual combination |
+| + Triple-Sparse (all three) | 13.79 | **-16.6%** | PEER + Engram + mHC |
 
 **Key findings**:
-- **mHC achieves 12.29 perplexity** (-25.7%), demonstrating that multi-stream residual connections significantly improve quality
-- **Engram** remains the strongest single addition for perplexity improvement
-- **PEER** provides parameter scaling with constant throughput
+- **Engram** (-31.7%) is the strongest single component for perplexity improvement
+- **mHC** (-25.7%) provides significant gains via multi-stream residual connections
+- **PEER** (-10.5%) provides parameter scaling with constant throughput
+- **Engram + PEER** (-33.1%) is the best dual combination
+- **Triple-Sparse** (-16.6%) underperforms individual components, suggesting partial redundancy
 
 Train each component:
 ```bash
 python train_and_eval.py          # Engram/PEER/Hybrid
 python train_peer_large.py --train --batches 3000 --lr 0.01  # PEER-262K
 python train_mhc.py --train --batches 1500  # mHC
+python train_triple.py --train --batches 3000  # All three together
 ```
 
 ## Key Insight: Initialization Matters

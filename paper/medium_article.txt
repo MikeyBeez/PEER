@@ -3,11 +3,27 @@ The Redundancy Bottleneck: Why Sparse Modules Compete and How to Coordinate Them
 
 THE CORE FINDING
 
-Sparse retrieval modules are not additive—they compete for representational real estate.
+Sparse retrieval modules are not additive—they compete for representational real estate (gradient signal and explanatory responsibility under a shared loss).
 
-If you combine multiple sparse mechanisms (expert routing, n-gram memory, retrieval systems) and train them jointly, the faster-learning module will crowd out the slower one. The combined system underperforms its components.
+If you combine multiple sparse mechanisms and train them jointly, the faster-learning module will monopolize the gradient signal, crowding out slower modules before they can specialize. The combined system underperforms its components.
 
 We call this the Redundancy Bottleneck.
+
+
+THE MECHANISM: LEARNING-SPEED ASYMMETRY
+
+The Redundancy Bottleneck is fundamentally an optimization-time phenomenon.
+
+When multiple modules can reduce the same training loss, gradient descent allocates explanatory responsibility to the module with the shortest effective path from input to loss. Simpler or more direct mechanisms learn faster, monopolizing the gradient signal early in training.
+
+As a result:
+- The faster-learning module collapses the error signal
+- Slower or higher-capacity modules receive diminished gradients
+- Latent capacity remains unused, even if it is expressive
+
+This is not unique to sparse retrieval. It applies to any modular system where components overlap functionally but differ in learning speed: MoE routing, stacked adapters, retrieval-augmented models, hybrid memory architectures.
+
+The failure mode is invisible in isolation and only emerges during joint optimization.
 
 
 THE EXPERIMENT
@@ -22,12 +38,12 @@ PEER (Parameter Efficient Expert Retrieval):
 Engram (N-gram Pattern Memory):
 - Hash-based lookup of 2-gram and 3-gram patterns
 - O(1) deterministic retrieval
-- Improves pattern recognition for common phrases
+- Direct path: hash → embedding → output
 
 mHC (Manifold-constrained Hyper-Connections):
 - Multi-stream residual connections
 - Doubly-stochastic mixing matrices
-- Stabilizes gradient flow
+- Hypothesized to act as "representational bandwidth multiplier"
 
 Each module works great individually:
 - Engram alone: -31.7% perplexity
@@ -39,15 +55,13 @@ But trained together? The triple-sparse system achieves only -16.6%. That's wors
 
 THE ROOT CAUSE: FUNCTIONAL OVERLAP
 
-We analyzed output magnitudes during joint training. The finding: Engram dominates at a 2.62:1 ratio over PEER.
+Functional overlap occurs when multiple modules can independently explain the same variance in the training objective.
 
-What's happening:
-1. Both PEER and Engram attempt to "retrieve" information based on input patterns
-2. Engram learns faster (simpler hash-based mechanism)
-3. Engram captures patterns that PEER would otherwise specialize in
-4. PEER becomes redundant—its capacity goes unused
+Both PEER and Engram attempt to "retrieve" information based on input patterns. But Engram's path (hash → embedding → output) is simpler than PEER's (query projection → product-key search → expert retrieval → output).
 
-This is functional overlap. The modules aren't complementary; they're competitive.
+Due to learning-speed asymmetry, Engram dominates early optimization. Output magnitude analysis confirms: Engram contributes 2.62x more than PEER in joint training.
+
+Engram captures patterns that PEER would otherwise specialize in. PEER's capacity goes unused.
 
 
 THE SOLUTION: DIFFERENTIAL LEARNING RATE TRAINING
@@ -69,7 +83,9 @@ Phase 2 - PEER Catches Up (1,000 batches):
 Phase 3 - Coordination (1,000 batches):
 - All modules: 5e-4 (medium)
 
-Critical insight: Never fully freeze modules. A minimal learning rate (1e-5) allows modules to adapt to each other's changing outputs. Complete freezing causes distribution shift—the frozen module becomes incompatible with the still-training modules.
+Critically, these phases are soft biases in learning speed, not strict stages. All modules remain plastic throughout training. The "following" module still adapts at 1e-5 LR, maintaining compatibility with the leader's evolving representations.
+
+Never fully freeze. Complete freezing causes distribution shift—the frozen module becomes incompatible with the still-training modules.
 
 
 THE RESULTS
@@ -83,19 +99,13 @@ Differential LR            11.05         -33.2%    (Best result)
 The same architecture yields vastly different results depending purely on training dynamics.
 
 
-WHY THIS MATTERS
+WHY mHC MATTERS
 
-1. Sparse modules compete, not cooperate
+mHC achieves -25.7% improvement, but its mechanism is less obvious than Engram or PEER.
 
-Any system combining multiple sparse retrieval mechanisms should expect this. MoE routing, hash-based memory, learned retrieval—they all fight for the same "information signal" unless coordinated.
+We hypothesize that mHC serves as a representational bandwidth multiplier: by expanding hidden states into multiple streams with doubly-stochastic mixing, mHC increases the effective dimensionality available for sparse modules to write into.
 
-2. Training strategy determines outcomes
-
-Architecture is not destiny. The Redundancy Bottleneck is invisible if you only test individual components. It only emerges when components interact during joint optimization.
-
-3. Differential LR is a general principle
-
-The specific ratios (1e-3 vs 1e-5) and phase lengths (1000 batches) are tuned for our setup. But the principle generalizes: let modules specialize sequentially rather than competing simultaneously.
+This may prevent early dominance from becoming irreversible—if Engram saturates one stream, PEER can still specialize in another. Gradient analysis shows mHC layers maintain significant gradient flow (0.73 mean magnitude), suggesting active participation in optimization rather than mere stabilization.
 
 
 PEER AS CAPACITY INSURANCE
@@ -120,7 +130,7 @@ PEER-803K        7.68B         26,262 tok/s
 
 PEER is capacity insurance—scaling headroom that doesn't bottleneck inference. Its value isn't immediate quality; it's future specialization potential.
 
-The Redundancy Bottleneck finding doesn't diminish this. It clarifies WHEN PEER's capacity becomes useful: on patterns Engram cannot capture (context-dependent, non-literal associations). Differential LR training ensures PEER learns these instead of redundantly duplicating Engram's work.
+The Redundancy Bottleneck finding clarifies WHEN PEER's capacity becomes useful: on patterns Engram cannot capture (context-dependent, non-literal associations). Differential LR training ensures PEER learns these instead of redundantly duplicating Engram's work.
 
 
 LIMITATIONS
@@ -143,16 +153,34 @@ Any multi-component system should:
 2. Use output magnitude analysis to diagnose dominance
 3. Consider differential LR or other coordination strategies
 
-The modules aren't the problem. The interaction is.
+The modules aren't the problem. The interaction under gradient descent is.
 
 
 KEY TAKEAWAYS
 
-1. Sparse modules compete for representational real estate
-2. Faster-learning modules crowd out slower ones during joint training
-3. Differential LR training forces specialization by letting modules take turns leading
-4. Never fully freeze—maintain minimal LR for adaptation
-5. Architecture + training dynamics = outcomes
+1. Sparse modules compete for representational real estate (gradient signal + explanatory responsibility)
+
+2. Learning-speed asymmetry causes the module with the shortest path to loss to dominate early optimization
+
+3. Functional overlap means multiple modules can explain the same variance—the faster one wins
+
+4. Differential LR training breaks the race by giving each module a protected learning window
+
+5. Never fully freeze—maintain minimal LR for adaptation
+
+6. Architecture is not destiny; training dynamics determine outcomes
+
+
+THE GENERALIZATION
+
+This applies beyond PEER + Engram + mHC:
+
+- MoE routing competing with dense layers
+- RAG retrieval competing with parametric memory
+- Stacked adapters competing for the same features
+- Any hybrid system with overlapping function
+
+When you see a modular system underperform its components, suspect the Redundancy Bottleneck. Diagnose with magnitude analysis. Fix with differential LR.
 
 
 CODE AVAILABILITY

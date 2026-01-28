@@ -1,11 +1,12 @@
-# PEER + Engram: Dual-Sparse Architecture for LLaMA
+# PEER + Engram + mHC: Triple-Sparse Architecture for LLaMA
 
-This project integrates two complementary "brain upgrades" into TinyLlama:
+This project integrates three complementary "brain upgrades" into TinyLlama:
 
 - **PEER** (Parameter Efficient Expert Retrieval) - Routes to specialized micro-experts based on hidden state
 - **Engram** - Retrieves static n-gram patterns based on literal text
+- **mHC** (Manifold-constrained Hyper-Connections) - Stable multi-stream residual connections
 
-Together they form a **Dual-Sparse Architecture**: PEER handles dynamic reasoning, Engram handles static pattern memory.
+Together they form a **Triple-Sparse Architecture**: PEER handles dynamic reasoning, Engram handles static pattern memory, and mHC stabilizes gradient flow at scale.
 
 ## Understanding PEER's Value Proposition
 
@@ -82,11 +83,17 @@ Without this fix, Engram produced PPL of 450 (+2626% worse). With it: PPL 11.30 
 - 100K vocab size per n-gram order
 - Gated addition to hidden states in early layers
 
+### mHC (All layers - experimental)
+- Expands hidden state into N parallel streams
+- Uses Sinkhorn-Knopp projection for doubly-stochastic mixing matrices
+- Stabilizes gradient flow for deeper/wider models
+- Based on [DeepSeek's mHC paper](https://arxiv.org/abs/2512.24880)
+
 ### Why This Combination Works
 - **Engram in early layers**: Recognizes common phrases as units (e.g., "United States", "New York") → improves quality
 - **PEER in later layers**: Provides massive parameter capacity with minimal VRAM overhead → enables scaling
-- They serve different purposes: Engram boosts perplexity, PEER enables efficient capacity expansion
-- They don't interfere because they operate at different depths
+- **mHC throughout**: Stabilizes training with manifold-constrained residuals → enables deeper scaling
+- They serve different purposes and don't interfere because they operate at different depths
 
 ## Usage
 
@@ -107,6 +114,7 @@ Shows which n-gram patterns the model learned to prioritize. Generates gate acti
 ## Files
 
 - `llama_peer_engram.py` - Core integration: PEER and Engram modules for LLaMA
+- `llama_mhc.py` - mHC (Manifold-constrained Hyper-Connections) module
 - `train_and_eval.py` - Training and evaluation script (Engram/PEER/Hybrid)
 - `train_peer_large.py` - Train large PEER configurations (262K+ experts)
 - `benchmark_efficiency.py` - VRAM/throughput/perplexity benchmark
@@ -126,6 +134,7 @@ tqdm
 
 - PEER: [Mixture of A Million Experts](https://arxiv.org/abs/2407.04153) - Product-key retrieval for massive sparse expert scaling
 - Engram: [Byte-Level Memory-Augmented Language Modeling](https://github.com/deepseek-ai/Engram) - N-gram pattern retrieval for quality improvement
+- mHC: [Manifold-Constrained Hyper-Connections](https://arxiv.org/abs/2512.24880) - Stable multi-stream residual connections
 
 ## License
 
